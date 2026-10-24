@@ -24,9 +24,35 @@ playbook:
     primary: "Travel planners and deal hunters"
     tone: "warm, vivid, practical"
   sources:
-    - tavily-travel
+    - hn-frontpage
     - hn-algolia
+    - reddit
+    - gdelt
+    - google-trends
+    - editorial-rss
+    - tavily-travel
     - fetch
+  # Research sweep — same Scout engine as AI News, travel configuration.
+  # Editorial feeds verified live (HTTP 200) on 2026-10-24.
+  research:
+    prefilter_keywords: [travel, flight, flights, hotel, hotels, airfare, fare, fares,
+      deal, deals, destination, destinations, vacation, airline, airlines, airport,
+      trip, trips, tourism, cruise, visa, itinerary]
+    hn_frontpage: { limit: 60 }
+    hn_search: { limit: 12 }
+    tavily: true
+    reddit:
+      subreddits: [travel, solotravel, TravelHacks, digitalnomad]
+      limit: 40
+    gdelt:
+      keywords: ['"airfare deals"', '"flight deals"', travel]
+      timespan: 24h
+      maxrecords: 50
+    trends: { geo: US }
+    editorial:
+      - { name: The Points Guy, url: "https://thepointsguy.com/feed/" }
+      - { name: Skift, url: "https://skift.com/feed/" }
+      - { name: Travel Off Path, url: "https://www.traveloffpath.com/feed/" }
   rubric:
     - { key: deal_value, label: "Deal Value", weight: 35 }
     - { key: urgency, label: "Urgency", weight: 20 }

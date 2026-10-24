@@ -8,6 +8,7 @@ from __future__ import annotations
 import asyncio
 import json
 import os
+import re
 import sys
 from concurrent.futures import ThreadPoolExecutor
 
@@ -31,15 +32,71 @@ def _evidence_block(evidence: list[dict]) -> str:
     return "\n".join(parts)
 
 
+# Public-facing artifacts must NEVER quote the internal rubric score/total —
+# scores are curation metadata for the briefing and Run Page only, not
+# reader copy (live-run review, 2026-10-24: the LinkedIn post shipped
+# "scored 63.9/100" verbatim). Enforced three ways: the maker templates
+# use the score-free _public_why(), the LLM prompt carries NO_SCORE_RULE,
+# and _scrub_scores() strips any numeric rating from drafts AND results.
+PUBLIC_KINDS = {"linkedin_post", "instagram_caption", "email", "reel_script"}
+NO_SCORE_RULE = ("NEVER quote the internal rubric score, any numeric rating or score total "
+                 "(e.g. '63.9/100', 'scored 87/100', 'Audience Heat 40/40') in the copy — "
+                 "scores are internal curation metadata, not reader-facing content. "
+                 "Say the story led the sweep, never the number it scored.")
+
+
+def _system_prompt(kind: str, tone: str) -> str:
+    system = (f"You are Prism's {kind} maker. Tone: {tone}. Use ONLY the evidence provided; "
+              "keep every source URL in the output. Return just the artifact text.")
+    if kind in PUBLIC_KINDS:
+        system += " " + NO_SCORE_RULE
+    return system
+
+
+_SCORE_SUBS = [
+    # "scored 63.9/100 (Audience Heat 7.9/40, …)" -> clean qualitative claim
+    (re.compile(r"scored\s+\d+(?:\.\d+)?\s*/\s*100\s*\([^)]*\)", re.I),
+     "topped the playbook rubric"),
+    # a bare rubric breakdown parenthetical: "(Consequence 20/20, Novelty 18/20)"
+    (re.compile(r"\(\s*(?:[A-Za-z][A-Za-z ]*\d+(?:\.\d+)?\s*/\s*\d+\s*,?\s*)+\)"), ""),
+    (re.compile(r"\b\d+(?:\.\d+)?\s*/\s*100\b"), ""),
+]
+
+
+def _scrub_scores(text: str) -> str:
+    """Remove internal rubric numbers from public copy (belt-and-braces
+    alongside NO_SCORE_RULE, for both templates and LLM output)."""
+    out = text or ""
+    for rx, repl in _SCORE_SUBS:
+        out = rx.sub(repl, out)
+    out = re.sub(r"\s+([.,;:])", r"\1", out)
+    return re.sub(r"[ \t]{2,}", " ", out)
+
+
+def _public_why(ctx) -> str:
+    """Score-free 'why this story led' sentence for public artifacts."""
+    p = ctx["picked"]
+    labels = [r["label"] for r in (ctx["playbook"].get("rubric") or [])]
+    if labels:
+        low = [l.lower() for l in labels]
+        joined = ", ".join(low[:-1]) + (f" and {low[-1]}" if len(low) > 1 else low[0])
+        basis = f"the playbook rubric's top pick on {joined}"
+    else:
+        basis = "the playbook rubric's top pick"
+    return (f"\"{p['title']}\" led a sweep of {len(ctx['candidates'])} candidates — {basis}.")
+
+
 def _polish(kind: str, fallback: str, picked: dict, evidence: list[dict], tone: str, notes: str = "") -> str:
+    public = kind in PUBLIC_KINDS
+    if public:
+        fallback = _scrub_scores(fallback)
     llm = get_llm()
     if llm.mode == "fallback":
         return fallback
-    system = (f"You are Prism's {kind} maker. Tone: {tone}. Use ONLY the evidence provided; "
-              "keep every source URL in the output. Return just the artifact text.")
     user = (f"Story: {picked['title']}\nEvidence:\n{_evidence_block(evidence)}\n"
             f"Draft to improve:\n{fallback}\nReviewer notes: {notes or 'none'}")
-    return llm.generate(system, user, fallback)
+    out = llm.generate(_system_prompt(kind, tone), user, fallback)
+    return _scrub_scores(out) if public else out
 
 
 def make_briefing(ctx) -> dict:
@@ -63,8 +120,7 @@ def make_reel_script(ctx) -> dict:
             f"**Hook (0–5s):** You need to see this — {p['title']}.\n\n"
             f"**What happened:** {p['title']}. The discussion is live right now "
             f"({p.get('points', 0)} points, {p.get('num_comments', 0)} comments on {p.get('source', '')}).\n\n"
-            f"**Why it matters:** This is the story leading today's conversation — scored on the "
-            f"playbook rubric: {ctx['score_explanation']}\n\n"
+            f"**Why it matters:** {_public_why(ctx)} It is the story leading today's conversation.\n\n"
             f"**The take:** Watch this space — the follow-up will land in the next Brief.\n\n"
             f"Sources: {', '.join(e['url'] for e in ev[:3] if e.get('url'))}\n")
     body = _polish("reel_script", body, p, ev, ctx["tone"], ctx.get("review_notes", ""))
@@ -116,8 +172,15 @@ _VERDICTS = {
 
 
 def _cap(text: str, limit: int = 125) -> str:
+    """Truncate to `limit` chars at a WORD boundary — never mid-word
+    (the old hard cut shipped cover contents lines ending '…P')."""
     text = " ".join((text or "").split())
-    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+    if len(text) <= limit:
+        return text
+    cut = text[: limit - 1]
+    if " " in cut:
+        cut = cut[: cut.rfind(" ")]
+    return cut.rstrip(" ,.;:—-") + "…"
 
 
 _CODEY = ("{", "}", "=>", "window.", "function(", "[data-", "();", "http://", "https://")
@@ -176,6 +239,7 @@ def _polish_stories_llm(stories: list[dict], ctx) -> list[dict]:
         system = ("You are the carousel editor for a daily digest. Rewrite each story's bullets as "
                   "three why-it-matters bullets (<=120 chars each, no engagement counts, no hype) "
                   "and a one-line verdict (<=85 chars), using ONLY the evidence given. "
+                  "Never mention scores, ratings, or '/100' numbers — they are internal metadata. "
                   "Return ONLY a JSON list of {bullets: [..], verdict: str} in the same order.")
         user = "\n\n".join(
             f"[{i}] {s['heading']}\nEvidence: {(s.get('_snippet') or '')[:400]}"
@@ -261,9 +325,10 @@ def _carousel_spec(ctx) -> dict:
     stories = _polish_stories_llm(stories, ctx)
     for s in stories:
         s.pop("_snippet", None)
+    # The carousel is public copy: the lead verdict must not quote the
+    # internal rubric total (score lives in the briefing / Run Page only).
     stories[0]["verdict"] = _cap(
-        f"Lead story — {ctx['scores'].get('total', '')}/100 on today's rubric. "
-        f"The one to read first.", 90) if ctx["scores"].get("total") else stories[0]["verdict"]
+        "Lead story — the playbook rubric's top pick. The one to read first.", 90)
 
     # B-roll only where the v3 rule allows it, resolved after the skin is known.
     if skin in ("neon-grid", "aurora"):
@@ -296,7 +361,7 @@ def _carousel_spec(ctx) -> dict:
         "slides": stories,
         "recap": {"rows": [[s["heading"], s["verdict"]] for s in stories],
                   "take": take,
-                  "take_sub": _cap(ctx["score_explanation"], 110)},
+                  "take_sub": _cap(_scrub_scores(ctx["score_explanation"]), 110)},
         "cta": car.get("cta") or ["Tomorrow's digest,", "same time, same place.",
                                   "Follow so you don't miss it."],
         "persona": {"name": car.get("persona_name", "Venu Tati"),
@@ -361,7 +426,7 @@ def make_carousel(ctx) -> dict:
 def make_linkedin_post(ctx) -> dict:
     p, ev = ctx["picked"], ctx["evidence"]
     body = (f"{p['title']} — and it's leading today's conversation.\n\n"
-            f"{ctx['score_explanation']}\n\n"
+            f"{_public_why(ctx)}\n\n"
             f"What I'm watching: the reaction in the thread ({p.get('num_comments', 0)} comments and counting) "
             f"and what ships next.\n\nFull briefing + carousel in the comments.\n\n"
             f"Source: {p['url']}\n#AI #BuildInPublic")
@@ -372,7 +437,7 @@ def make_linkedin_post(ctx) -> dict:
 
 def make_instagram_caption(ctx) -> dict:
     p = ctx["picked"]
-    body = (f"Today's top story 👇\n{p['title']}\n\n{ctx['score_explanation']}\n\n"
+    body = (f"Today's top story 👇\n{p['title']}\n\n{_public_why(ctx)}\n\n"
             f"Full brief at the link in bio. Source: {p['url']}\n#AInews #Tech")
     body = _polish("instagram_caption", body, p, ctx["evidence"], ctx["tone"], ctx.get("review_notes", ""))
     return {"type": "instagram_caption", "title": "Instagram caption", "content": body,
@@ -382,7 +447,7 @@ def make_instagram_caption(ctx) -> dict:
 def make_email(ctx) -> dict:
     p, ev = ctx["picked"], ctx["evidence"]
     body = (f"Subject: Today's Brief — {p['title'][:70]}\n\n"
-            f"Hi there,\n\nToday's top story: {p['title']}.\n\nWhy it led: {ctx['score_explanation']}\n\n"
+            f"Hi there,\n\nToday's top story: {p['title']}.\n\nWhy it led: {_public_why(ctx)}\n\n"
             f"Read the sources:\n{_citations(ev)}\n\n— Prism, for the {ctx['playbook'].get('name', '')} playbook")
     body = _polish("email", body, p, ev, ctx["tone"], ctx.get("review_notes", ""))
     return {"type": "email", "title": "Email draft", "content": body,

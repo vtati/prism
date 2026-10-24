@@ -57,10 +57,17 @@ def score_candidate(c: dict, rubric: list[dict], past_urls: set, past_titles: se
     pts, comments = c.get("points", 0), c.get("num_comments", 0)
     heat = min(1.0, (math.log10(pts + 1) / 3.0) * 0.7 + (math.log10(comments + 1) / 2.5) * 0.3)
     text = f"{c.get('title', '')} {c.get('snippet', '')}"
+    # Verification: a resolvable source URL is the base signal (0.9).
+    # Independent corroboration — Scout's merge saw the same story on 2+
+    # channels (HN + Reddit + GDELT + Trends + editorial) — adds +0.1 per
+    # extra channel, capped at 1.0: a single-source story tops out at
+    # 0.9 (18/20 on the Digest rubric), a corroborated one can max it.
+    corr = int(c.get("corroboration") or 1)
+    verification = min(1.0, (0.9 if c.get("url") else 0.2) + 0.1 * max(0, corr - 1))
     raw = {
         "audience_heat": heat,
         "consequence": max(0.25, _kw(text, CONSEQUENCE_WORDS)),
-        "verification": 0.9 if c.get("url") else 0.2,
+        "verification": verification,
         "novelty": 0.1 if (c.get("url") in past_urls or c.get("title") in past_titles) else 0.9,
         "deal_value": max(heat * 0.6, _kw(text, DEAL_WORDS)),
         "urgency": max(0.3, _kw(text, URGENCY_WORDS)),
@@ -92,13 +99,15 @@ def node_scout(state: PrismState) -> dict:
     rid = state["run_id"]
     pb = load_playbook(state["playbook_id"])
     emit(rid, "scout", "Scout", "started", f"Scout is rummaging for \"{state['topic']}\"…")
-    candidates, calls = scout_search(state["topic"], pb.get("sources") or [])
+    candidates, calls, stats = scout_search(state["topic"], pb.get("research") or {},
+                                            pb.get("sources") or [])
     emit(rid, "scout", "Scout", "done",
          f"Scout gathered {len(candidates)} candidates via {', '.join(calls)}",
-         {"tool_calls": calls, "count": len(candidates),
+         {"tool_calls": calls, "count": len(candidates), "by_source": stats,
           "candidates": [{"title": c["title"], "url": c["url"]} for c in candidates]})
     meta = dict(state.get("run_meta") or {})
     meta["tool_calls"] = calls
+    meta["source_counts"] = stats
     return {"candidates": candidates, "evidence": candidates[:5], "run_meta": meta, "status": "curating"}
 
 
@@ -115,6 +124,9 @@ def node_curator(state: PrismState) -> dict:
     expl = (f"\"{picked['title']}\" scored {scores['total']}/100 ({parts}) across "
             f"{len(scored)} candidates, with {picked.get('points', 0)} points and "
             f"{picked.get('num_comments', 0)} comments of live discussion.")
+    if (picked.get("corroboration") or 1) >= 2:
+        expl += (f" Corroborated by {picked['corroboration']} independent sources "
+                 f"({picked.get('source', '')}) — verification boosted.")
     emit(rid, "curator", "Curator", "done", f"Curator picked the lead story. {expl}",
          {"scores": scores, "picked": picked["title"]})
     return {"picked": picked, "scores": scores, "score_explanation": expl, "status": "archiving"}
