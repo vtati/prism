@@ -16,7 +16,7 @@ from langgraph.checkpoint.sqlite import SqliteSaver  # noqa: E402
 from langgraph.types import Command  # noqa: E402
 
 from app.config import CHECKPOINT_DB  # noqa: E402
-from app.editions import ROTATION, skin_for_edition  # noqa: E402
+from app.editions import ROTATION, skin_for_edition, skin_for_playbook  # noqa: E402
 from app.graph import build_graph  # noqa: E402
 from app.makers import _carousel_spec, render_carousel_for_run  # noqa: E402
 from app.playbooks import load_playbook  # noqa: E402
@@ -45,6 +45,29 @@ def test_skin_rotation_follows_v3_order():
     assert "statdeck" not in ROTATION  # rejected format — never in rotation
 
 
+def test_ai_news_default_skin_is_poster_fixed():
+    # Venugopal, locked 2026-10-16-20: POSTER is the standing default for
+    # EVERY daily edition — light bg, colored per-slot vertical bars.
+    pb = load_playbook("ai-news-gtm")
+    assert pb["carousel"]["skin"] == "poster"
+    assert pb["carousel"]["skin_mode"] == "fixed"
+    for edition in (1, 2, 3, 4, 5, 9):
+        assert skin_for_playbook(pb, edition) == "poster"
+    spec = _carousel_spec(_ctx("ai-news-gtm", "poster-" + uuid.uuid4().hex[:8]))
+    assert spec["skin"] == "poster"
+
+
+def test_rotation_only_when_explicitly_enabled():
+    pb = load_playbook("ai-news-gtm")
+    rotating = {**pb, "carousel": {**pb["carousel"], "skin_mode": "rotation"}}
+    assert skin_for_playbook(rotating, 1) == "frontpage"
+    assert skin_for_playbook(rotating, 4) == "poster"
+    ctx = _ctx("ai-news-gtm", "rot-" + uuid.uuid4().hex[:8])
+    ctx["playbook"] = rotating
+    spec = _carousel_spec(ctx)
+    assert spec["skin"] == skin_for_edition(spec["edition"])
+
+
 def test_spec_is_v3_structure():
     spec = _carousel_spec(_ctx("ai-news-gtm", "v3-spec-" + uuid.uuid4().hex[:8]))
     assert len(spec["slides"]) == 5, "v3 has exactly five story slides"
@@ -55,7 +78,7 @@ def test_spec_is_v3_structure():
     assert all(s["verdict"] for s in spec["slides"]), "every story carries a verdict"
     assert spec["cta"], "CTA lines present (slide 8)"
     assert spec["persona"]["brand"] == "Venu Tati · AI Dev Digest"
-    assert spec["skin"] in ROTATION
+    assert spec["skin"] == "poster"  # standing default, not the rotation
     # why-it-matters bullets are written from evidence, not engagement counts
     for s in spec["slides"]:
         assert len(s["bullets"]) == 3
@@ -97,5 +120,5 @@ def test_graph_run_ships_v3_carousel():
     arts = graph.get_state(config).values.get("artifacts") or {}
     car = arts.get("linkedin_carousel") or {}
     assert car.get("slide_count") == 8, f"expected v3 8-slide carousel, got {car.get('slide_count')}"
-    assert car.get("skin") in ROTATION
+    assert car.get("skin") == "poster", f"ai-news runs ship poster, got {car.get('skin')}"
     assert isinstance(car.get("edition"), int) and car["edition"] >= 1
