@@ -10,6 +10,14 @@ playbook:
     end: "#E879A9"
     accent: "#EA580C"
     brand: "Travel Brief · Prism"
+  carousel:  # Same v3 Front Page structure as the Digest; sunset skin family
+    title: "Travel Brief"
+    brand_short: "TRAVEL BRIEF"
+    persona_name: "Venu Tati"
+    persona_brand: "Venu Tati · Travel Brief"
+    persona_position: "I track routes, fares and seasons so you can just go."
+    slots: [DESTINATIONS, DEALS, ROUTES, GUIDES, NEWS]
+    cta: ["Tomorrow's brief,", "new routes, real deals.", "Follow so you don't miss it."]
   audience:
     primary: "Travel planners and deal hunters"
     tone: "warm, vivid, practical"

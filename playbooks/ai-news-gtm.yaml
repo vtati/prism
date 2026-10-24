@@ -10,6 +10,14 @@ playbook:
     end: "#7C6CF0"
     accent: "#7C6CF0"
     brand: "AI Daily Brief · Prism"
+  carousel:  # AI Dev Digest format v3 (Front Page) — the finalized production format
+    title: "AI Dev Digest"
+    brand_short: "AI DEV DIGEST"
+    persona_name: "Venu Tati"
+    persona_brand: "Venu Tati · AI Dev Digest"
+    persona_position: "AI architect — I read the firehose so you don't have to."
+    slots: [PRODUCT, FRAMEWORKS, REPO, RESEARCH, ECOSYSTEM]
+    cta: ["Tomorrow's digest,", "same time, same place.", "Follow so you don't miss it."]
   audience:
     primary: "AI-curious professionals"
     tone: "clear, punchy, no hype"

@@ -22,8 +22,12 @@ mcp = FastMCP("prism-carousel")
 def render_carousel(spec_json: str, output_dir: str) -> str:
     """Render a 1080x1350 carousel (PDF + PNG slides) from a JSON spec.
 
-    spec: {title, subtitle, brand, theme:{start,end,accent},
-           slides:[{heading, bullets[]}]} — bullets capped at 125 chars.
+    spec: AI Dev Digest format v3 — {kicker, title, date_line, cover_sub,
+           lead{heading, deck, tag}, contents[{n, head, tease}],
+           slides[5]{heading, tag, bullets[<=125 chars], verdict, broll?},
+           recap{rows[[head, verdict] x5], take, take_sub}, cta[lines],
+           persona{name, brand, position}, skin, edition}
+    Always renders exactly 8 pages: cover + 5 stories + recap + CTA.
     Returns a JSON string with pdf_path, png_paths and slide_count.
     """
     spec = json.loads(spec_json)
