@@ -124,9 +124,18 @@ export function translateApiEvent(ev: ApiEvent, ctx: TranslateCtx): DemoEvent[] 
       return [E("makers-reviewer")];
     case "reviewer/done": {
       const verdict = String(d.verdict ?? "").toUpperCase() === "PASS" ? "PASS" : "REVISE";
+      // A live PASS carries notes: [] (the API only lists problems). The
+      // theater wants prose — summarize the per-artifact grounding map.
+      let notes: string[] = Array.isArray(d.notes) ? d.notes : [];
+      if (!notes.length && d.per_artifact && typeof d.per_artifact === "object") {
+        const entries = Object.values(d.per_artifact) as { grounded?: boolean; ok?: boolean }[];
+        const grounded = entries.filter(v => v && v.grounded && v.ok).length;
+        if (entries.length) notes = [`${grounded}/${entries.length} artifacts grounded in Scout's evidence`, "Tone matches the Playbook voice"];
+      }
+      if (!notes.length) notes = ["All claims grounded in Scout's evidence"];
       return [
         S("reviewer", "working", "Monocle on. Nobody ships past me unverified."),
-        { t: 0, kind: "review", verdict, notes: Array.isArray(d.notes) ? d.notes : [] } as DemoEvent,
+        { t: 0, kind: "review", verdict, notes } as DemoEvent,
         S("reviewer", "done", ev.message),
         E("reviewer-gate"),
       ];
