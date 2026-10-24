@@ -1,0 +1,36 @@
+playbook:
+  id: ai-news-gtm
+  name: "AI News — GTM"
+  domain: ai-news
+  default_query: "artificial intelligence"
+  theme:
+    gradient: "sky-violet"
+    skin: "aurora"
+    start: "#38BDF8"
+    end: "#7C6CF0"
+    accent: "#7C6CF0"
+    brand: "AI Daily Brief · Prism"
+  audience:
+    primary: "AI-curious professionals"
+    tone: "clear, punchy, no hype"
+  sources:
+    - tavily-search
+    - hn-algolia
+    - fetch
+    - github-trending
+  rubric:
+    - { key: audience_heat, label: "Audience Heat", weight: 40 }
+    - { key: consequence, label: "Consequence", weight: 20 }
+    - { key: verification, label: "Verification", weight: 20 }
+    - { key: novelty, label: "Novelty", weight: 20 }
+  knowledge:
+    - brand-voice.md
+    - past-runs/
+  makers: [briefing, reel_script, linkedin_carousel, linkedin_post, instagram_caption, email]
+  review_rules:
+    - every_claim_grounded_in_sources
+    - no_story_covered_before
+    - self_contained_for_a_new_viewer
+    - tone_matches_playbook
+  publish_targets: [run_page]
+  human_gate: before_publish

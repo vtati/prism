@@ -1,0 +1,35 @@
+playbook:
+  id: travel-news
+  name: "Travel News — GTM"
+  domain: travel-news
+  default_query: "travel destinations"
+  theme:
+    gradient: "sunset"
+    skin: "aurora"
+    start: "#FB923C"
+    end: "#E879A9"
+    accent: "#EA580C"
+    brand: "Travel Brief · Prism"
+  audience:
+    primary: "Travel planners and deal hunters"
+    tone: "warm, vivid, practical"
+  sources:
+    - tavily-travel
+    - hn-algolia
+    - fetch
+  rubric:
+    - { key: deal_value, label: "Deal Value", weight: 35 }
+    - { key: urgency, label: "Urgency", weight: 20 }
+    - { key: seasonality, label: "Seasonality", weight: 20 }
+    - { key: verification, label: "Verification", weight: 25 }
+  knowledge:
+    - brand-voice.md
+    - past-runs/
+  makers: [briefing, linkedin_carousel, linkedin_post, email]
+  review_rules:
+    - every_claim_grounded_in_sources
+    - no_story_covered_before
+    - self_contained_for_a_new_viewer
+    - tone_matches_playbook
+  publish_targets: [run_page]
+  human_gate: before_publish
