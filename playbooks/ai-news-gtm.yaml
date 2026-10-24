@@ -11,6 +11,13 @@ playbook:
     accent: "#7C6CF0"
     brand: "AI Daily Brief · Prism"
   carousel:  # AI Dev Digest format v3 (Front Page) — the finalized production format
+    # Skin rule (Venugopal, locked 2026-10-16–20): POSTER is the standing
+    # default for EVERY edition (light bg, colored per-slot vertical bars).
+    # frontpage = alternate light skin on request only; dark skins
+    # (terminal, neon-grid, aurora) = special-occasion only. Rotation is
+    # available only when a playbook explicitly sets skin_mode: rotation.
+    skin: poster
+    skin_mode: fixed
     title: "AI Dev Digest"
     brand_short: "AI DEV DIGEST"
     persona_name: "Venu Tati"

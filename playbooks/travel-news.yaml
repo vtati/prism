@@ -11,6 +11,8 @@ playbook:
     accent: "#EA580C"
     brand: "Travel Brief · Prism"
   carousel:  # Same v3 Front Page structure as the Digest; sunset skin family
+    skin: sunset
+    skin_mode: fixed
     title: "Travel Brief"
     brand_short: "TRAVEL BRIEF"
     persona_name: "Venu Tati"

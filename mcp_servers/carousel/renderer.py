@@ -13,8 +13,12 @@ v3 STRUCTURE — fixed 8 pages, 1080x1350, every edition:
   7 "Today in one screen" recap: 5 headlines + verdicts + quotable take
   8 person-led CTA (persona avatar + name + position + follow lines)
 
-Skins rotate by edition: [frontpage, terminal, neon-grid, poster, aurora],
-skin = ROTATION[(edition - 1) % 5]. "sunset" is the Travel family's skin:
+Skins: poster is the standing Digest default for every edition (Venugopal,
+locked 2026-10-16–20); frontpage is an alternate light skin on request and
+terminal / neon-grid / aurora are special-occasion only. The legacy edition
+rotation over [frontpage, terminal, neon-grid, poster, aurora],
+skin = ROTATION[(edition - 1) % 5], applies only when a playbook explicitly
+opts in (carousel.skin_mode: rotation). "sunset" is the Travel family's skin:
 the frontpage layout in warm sunset colours (same structure, swapped theme).
 statdeck is REJECTED (Venugopal, 2026-10-14) — not ported, never used.
 
