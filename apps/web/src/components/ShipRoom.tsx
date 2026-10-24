@@ -15,7 +15,7 @@ export default function ShipRoom({ phase, review, runPageTitle, playbookName, to
       {phase === "running" && <p>The team is mid-run… Vera gets the final word before anything reaches you. Reads are autonomous; writes always wait. 🙋</p>}
       {phase === "awaiting" && (
         <>
-          <p><b>The suite is complete and Reviewer-approved.</b> {review ? `${review.notes.length} checks passed, including: ${review.notes[0].toLowerCase()}.` : ""} Approve it to publish the Run Page — or send it back with notes.</p>
+          <p><b>The suite is complete and Reviewer-approved.</b> {review ? (review.notes.length ? `${review.notes.length} checks passed, including: ${review.notes[0].toLowerCase()}.` : "All grounding and tone checks passed.") : ""} Approve it to publish the Run Page — or send it back with notes.</p>
           <div className="row">
             <button className="btn" onClick={onApprove}>✅ Approve &amp; Publish</button>
             <button className="btn ghost2" onClick={onChanges}>✏️ Request changes</button>
