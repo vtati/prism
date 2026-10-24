@@ -523,7 +523,8 @@ def merge_candidates(groups: list[list[dict]]) -> list[dict]:
 # ---------------------------------------------------------------------------
 
 def scout_search(query: str, research: dict | None = None,
-                 sources: list[str] | None = None) -> tuple[list[dict], list[str], dict]:
+                 sources: list[str] | None = None,
+                 progress=None) -> tuple[list[dict], list[str], dict]:
     """Returns (candidates, tool_calls_made, per-source counts).
 
     With a playbook `research:` block, query EVERY configured source
@@ -531,9 +532,21 @@ def scout_search(query: str, research: dict | None = None,
     candidates' thin snippets with fetched page text. Without one, the
     legacy behaviour (Tavily-if-listed, else HN query search) applies.
     The recorded fixture is the last-resort fallback either way.
+
+    `progress(channel, count)`, when given, fires as each source family
+    completes and around the merge/enrich steps — the sweep can run for
+    minutes, and callers stream these so the run never looks dead.
     """
     calls: list[str] = []
     stats: dict[str, int] = {}
+
+    def _report(channel: str, count: int) -> None:
+        if progress is None:
+            return
+        try:
+            progress(channel, count)
+        except Exception:
+            pass
 
     if not research:
         candidates: list[dict] = []
@@ -541,20 +554,26 @@ def scout_search(query: str, research: dict | None = None,
             candidates = fetch_tavily(query)
             calls.append("mcp:tavily-search" if candidates else "mcp:tavily-search (no key/results)")
             stats["tavily"] = len(candidates)
+            _report("tavily-search", len(candidates))
         if not candidates:
             candidates = fetch_hn(query)
             calls.append("hn-algolia")
             stats["hn"] = len(candidates)
+            _report("hn-algolia", len(candidates))
         if not candidates:  # retry via second source with a broader query
             broader = query.split()[0] if query.split() else query
             candidates = fetch_hn(broader)
             calls.append("hn-algolia (retry, broader query)")
             stats["hn"] = len(candidates)
+            _report("hn-algolia", len(candidates))
         if not candidates:
             candidates = merge_candidates([[dict(c) for c in FIXTURE]])
             calls.append("recorded-fixture (offline fallback)")
             stats["fixture"] = len(candidates)
+            _report("recorded-fixture", len(candidates))
+        _report("enrich", len(candidates))
         _enrich(candidates)
+        _report("merged", len(candidates))
         return candidates, calls, stats
 
     keywords = research.get("prefilter_keywords") or []
@@ -565,6 +584,7 @@ def scout_search(query: str, research: dict | None = None,
         stats[channel] = stats.get(channel, 0) + len(items)
         if items:
             groups.append(items)
+        _report(call, len(items))
 
     if research.get("tavily", True):
         items = fetch_tavily(query)
@@ -572,6 +592,7 @@ def scout_search(query: str, research: dict | None = None,
         stats["tavily"] = len(items)
         if items:
             groups.append(items)
+        _report("tavily-search", len(items))
 
     fp_cfg = research.get("hn_frontpage")
     if fp_cfg:
@@ -620,7 +641,9 @@ def scout_search(query: str, research: dict | None = None,
         stats["fixture"] = len(candidates)
     stats["merged_total"] = len(candidates)
     stats["corroborated"] = sum(1 for c in candidates if (c.get("corroboration") or 1) >= 2)
+    _report("enrich", len(candidates))
     _enrich(candidates)
+    _report("merged", len(candidates))
     return candidates, calls, stats
 
 

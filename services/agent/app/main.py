@@ -12,9 +12,10 @@ import asyncio
 import json
 import sqlite3
 import threading
+import time
 import uuid
 
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from langgraph.checkpoint.sqlite import SqliteSaver
@@ -179,27 +180,50 @@ def get_run(run_id: str):
     return {**run, "events": get_events(run_id)}
 
 
-@app.get("/runs/{run_id}/events")
-async def run_events(run_id: str):
-    async def gen():
-        idx = 0
-        idle = 0
-        while True:
-            events = get_events(run_id)
-            while idx < len(events):
-                yield f"data: {json.dumps(events[idx])}\n\n"
-                idx += 1
-                idle = 0
-            with _lock:
-                status = (_runs.get(run_id) or {}).get("status", "unknown")
-            if status in ("shipped", "exported_not_approved", "failed", "done"):
-                break
-            idle += 1
-            if idle > 600:  # ~5 min max stream
-                break
-            await asyncio.sleep(0.5)
+HEARTBEAT_S = 15.0  # SSE ping cadence: the stream never goes byte-silent
+TERMINAL_STATUSES = ("shipped", "exported_not_approved", "failed", "done")
 
-    return StreamingResponse(gen(), media_type="text/event-stream")
+
+async def _stream_frames(run_id: str, last_event_id: int | None = None):
+    """SSE frames for a run. Each data frame carries `id: <event index>` so
+    an EventSource reconnect can resume via Last-Event-ID; while the run
+    is active but quiet (e.g. the Scout sweep), an `event: ping` frame is
+    emitted every HEARTBEAT_S seconds so no hop's idle timeout can kill
+    the connection — the 2026-10-24 incident was 130-370s of byte silence
+    during Scout, after which the UI declared the stream dropped while
+    the run shipped server-side."""
+    idx = (last_event_id + 1) if last_event_id is not None else 0
+    idle = 0
+    last_yield = time.monotonic()
+    while True:
+        events = get_events(run_id)
+        while idx < len(events):
+            yield f"id: {idx}\ndata: {json.dumps(events[idx])}\n\n"
+            idx += 1
+            idle = 0
+            last_yield = time.monotonic()
+        with _lock:
+            status = (_runs.get(run_id) or {}).get("status", "unknown")
+        if status in TERMINAL_STATUSES:
+            return
+        if time.monotonic() - last_yield >= HEARTBEAT_S:
+            yield "event: ping\ndata: {}\n\n"
+            last_yield = time.monotonic()
+        idle += 1
+        if idle > 3600:  # ~30 min absolute cap
+            return
+        await asyncio.sleep(0.5)
+
+
+@app.get("/runs/{run_id}/events")
+async def run_events(run_id: str, request: Request):
+    last = request.headers.get("last-event-id")
+    try:
+        last_id = int(last) if last is not None else None
+    except ValueError:
+        last_id = None
+    return StreamingResponse(_stream_frames(run_id, last_id),
+                             media_type="text/event-stream")
 
 
 @app.post("/runs/{run_id}/approve")
