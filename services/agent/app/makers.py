@@ -72,30 +72,239 @@ def make_reel_script(ctx) -> dict:
             "citations": [e["url"] for e in ev if e.get("url")]}
 
 
+# ---------------------------------------------------------------------------
+# Carousel — AI Dev Digest format v3 ("Front Page" system), the finalized
+# production format: fixed 8 slides = masthead cover (lead headline + deck +
+# ALSO IN TODAY'S DIGEST contents) / 5 story slides (why-it-matters bullets
+# + one-line verdict) / "Today in one screen" recap / person-led CTA.
+# Skin rotates by edition (see editions.py); Travel keeps the same structure
+# in its sunset skin. Bullets/verdicts are written from evidence — never raw
+# engagement counts. An LLM polish pass rewrites them when a key is live.
+# ---------------------------------------------------------------------------
+import re
+from datetime import datetime, timezone
+
+from .editions import assign_edition, skin_for_edition
+
+_TAG_HINTS = [
+    ("REPO", ["github", "repo", "open-source", "open source", "library", "sdk"]),
+    ("RESEARCH", ["paper", "arxiv", "study", "research", "benchmark", "dataset"]),
+    ("FRAMEWORKS", ["framework", "runtime", "compiler", "engine", "platform", "api"]),
+    ("PRODUCT", ["launch", "launches", "release", "releases", "ships", "model", "app", "tool"]),
+]
+_TRAVEL_TAG_HINTS = [
+    ("DEALS", ["deal", "fare", "sale", "discount", "cheap", "price drop", "offer"]),
+    ("ROUTES", ["route", "flight", "airline", "airport", "train", "nonstop"]),
+    ("GUIDES", ["guide", "itinerary", "tips", "how to", "best time"]),
+    ("DESTINATIONS", ["destination", "city", "island", "beach", "mountain", "park"]),
+]
+
+_VERDICTS = {
+    "PRODUCT": "Ship-worthy — this changes what builders can use today.",
+    "FRAMEWORKS": "Under the hood, but it moves every stack built on it.",
+    "REPO": "Star it now; you'll reach for it sooner than you think.",
+    "RESEARCH": "Read the paper — the detail is the story.",
+    "ECOSYSTEM": "Zoom out: this is the ecosystem redrawing its map.",
+    "DESTINATIONS": "Put it on the list — timing is on your side.",
+    "DEALS": "Bookable value, not marketing confetti. Check the dates.",
+    "ROUTES": "New way in — reprice any trip you were planning.",
+    "GUIDES": "Save this one; future-you says thanks at the airport.",
+    "NEWS": "Worth knowing before you book anything else.",
+    "_default": "Worth your time — a real signal, not noise.",
+}
+
+
+def _cap(text: str, limit: int = 125) -> str:
+    text = " ".join((text or "").split())
+    return text if len(text) <= limit else text[: limit - 1].rstrip() + "…"
+
+
+_CODEY = ("{", "}", "=>", "window.", "function(", "[data-", "();", "http://", "https://")
+
+
+def _sentences(text: str) -> list[str]:
+    parts = re.split(r"(?<=[.!?])\s+", " ".join((text or "").split()))
+    out = []
+    for s in parts:
+        s = s.strip()
+        if len(s) <= 24 or any(tok in s for tok in _CODEY):
+            continue  # skip scraped markup/code fragments — not reader copy
+        out.append(s)
+    return out
+
+
+def _tag_for(candidate: dict, slots: list[str], idx: int, domain: str) -> str:
+    hints = _TRAVEL_TAG_HINTS if domain == "travel-news" else _TAG_HINTS
+    hay = f"{candidate.get('title', '')} {candidate.get('snippet', '')}".lower()
+    for tag, keys in hints:
+        if tag in slots and any(k in hay for k in keys):
+            return tag
+    return slots[idx % len(slots)] if slots else ""
+
+
+def _story_bullets(candidate: dict) -> list[str]:
+    """Three why-it-matters bullets written from the candidate's evidence.
+    Bullet 1 is what happened (never the engagement counts), bullet 2 is the
+    implication, bullet 3 is the concrete detail / proof."""
+    sents = _sentences(candidate.get("snippet") or "")
+    title = candidate.get("title", "")
+    b1 = _cap(sents[0]) if sents else _cap(f"{title} — the latest from {candidate.get('source', 'the wire')}.")
+    if len(sents) > 1:
+        b2 = _cap(sents[1])
+        if not b2.lower().startswith("why it matters"):
+            b2 = _cap(f"Why it matters: {b2[0].lower() + b2[1:]}" if b2 else b2)
+    else:
+        b2 = _cap(f"Why it matters: it is setting the agenda in today's discussion — "
+                  f"the follow-ups will build on this, not on yesterday's news.")
+    if len(sents) > 2:
+        b3 = _cap(sents[2])
+    else:
+        b3 = _cap(f"Source: {candidate.get('source', 'wire')} — full link and discussion in the Run Page.")
+    return [b1, b2, b3]
+
+
+def _polish_stories_llm(stories: list[dict], ctx) -> list[dict]:
+    """Optional live-mode rewrite of bullets/verdicts/deck as strict JSON,
+    evidence-bound. Any failure returns the grounded templates unchanged."""
+    llm = get_llm()
+    if llm.mode == "fallback":
+        return stories
+    try:
+        import json as _json
+
+        system = ("You are the carousel editor for a daily digest. Rewrite each story's bullets as "
+                  "three why-it-matters bullets (<=120 chars each, no engagement counts, no hype) "
+                  "and a one-line verdict (<=85 chars), using ONLY the evidence given. "
+                  "Return ONLY a JSON list of {bullets: [..], verdict: str} in the same order.")
+        user = "\n\n".join(
+            f"[{i}] {s['heading']}\nEvidence: {(s.get('_snippet') or '')[:400]}"
+            for i, s in enumerate(stories))
+        raw = llm.generate(system, user, "")
+        data = _json.loads(raw[raw.find("["): raw.rfind("]") + 1])
+        if isinstance(data, list) and len(data) == len(stories):
+            for s, d in zip(stories, data):
+                if isinstance(d, dict) and len(d.get("bullets") or []) >= 2:
+                    s["bullets"] = [_cap(b, 125) for b in d["bullets"][:3]]
+                    if d.get("verdict"):
+                        s["verdict"] = _cap(d["verdict"], 90)
+        return stories
+    except Exception:
+        return stories
+
+
+def _resolve_broll(candidate: dict, out_dir: str, idx: int) -> str | None:
+    """v3 B-roll sourcing: the story source's own lead (og:image) image,
+    downloaded and validated. ANY failure returns None — flat skin design
+    is the fallback and a render never blocks on an image."""
+    url = candidate.get("url") or ""
+    if not url.startswith("http") or "news.ycombinator.com" in url:
+        return None
+    try:
+        import httpx
+        from PIL import Image
+
+        from .scout import _proxy  # this env needs the explicit egress proxy
+
+        headers = {"User-Agent": "Mozilla/5.0 (Prism digest b-roll)"}
+        page = httpx.get(url, timeout=6, follow_redirects=True, headers=headers, proxy=_proxy())
+        m = re.search(r'property=["\']og:image["\']\s+content=["\']([^"\']+)', page.text) or \
+            re.search(r'content=["\']([^"\']+)["\']\s+property=["\']og:image["\']', page.text)
+        if not m:
+            return None
+        img_url = m.group(1)
+        if img_url.startswith("//"):
+            img_url = "https:" + img_url
+        raw = httpx.get(img_url, timeout=6, follow_redirects=True, headers=headers, proxy=_proxy())
+        if len(raw.content) < 8000:
+            return None
+        os.makedirs(out_dir, exist_ok=True)
+        path = os.path.join(out_dir, f"broll-{idx + 1}.jpg")
+        with open(path, "wb") as f:
+            f.write(raw.content)
+        im = Image.open(path)
+        im.verify()
+        return path
+    except Exception:
+        return None
+
+
 def _carousel_spec(ctx) -> dict:
-    p = ctx["picked"]
-    theme = ctx["playbook"].get("theme") or {}
-    slides = []
-    for c in ctx["candidates"][:5]:
-        bullets = [
-            f"{c.get('points', 0)} points · {c.get('num_comments', 0)} comments on {c.get('source', '')}",
-            (c.get("snippet") or "Fresh signal from today's sweep.")[:120],
-            f"Source: {c['url']}"[:120],
-        ]
-        slides.append({"heading": c["title"][:90], "bullets": bullets})
-    slides.append({"heading": "Today in one screen",
-                   "bullets": [f"Top pick: {p['title']}"[:120],
-                               f"Why: {ctx['score_explanation']}"[:120],
-                               "Full suite + sources in the Run Page."]})
+    pb = ctx["playbook"]
+    car = pb.get("carousel") or {}
+    domain = pb.get("domain", "")
+    picked = ctx["picked"]
+    edition = assign_edition(ctx["run_id"], pb.get("id", ""))
+    # Travel keeps its sunset skin family; everyone else rotates by edition.
+    if domain == "travel-news" or (pb.get("theme") or {}).get("gradient") == "sunset":
+        skin = "sunset"
+    else:
+        skin = skin_for_edition(edition)
+
+    # Five stories: the curator's pick leads; the rest follow by engagement.
+    rest = [c for c in ctx["candidates"] if c.get("url") != picked.get("url")]
+    rest.sort(key=lambda c: (c.get("points", 0), c.get("num_comments", 0)), reverse=True)
+    stories_src = [picked] + rest[:4]
+    while len(stories_src) < 5:  # defensive: the v3 structure needs five
+        stories_src.append({"title": f"More from today's {ctx['topic']} sweep",
+                              "url": picked.get("url", ""), "source": picked.get("source", ""),
+                              "snippet": ctx["score_explanation"], "points": 0, "num_comments": 0})
+
+    slots = car.get("slots") or ["PRODUCT", "FRAMEWORKS", "REPO", "RESEARCH", "ECOSYSTEM"]
+    stories = []
+    for i, c in enumerate(stories_src):
+        tag = _tag_for(c, slots, i, domain)
+        stories.append({"heading": _cap(c["title"], 110), "tag": tag,
+                        "bullets": _story_bullets(c),
+                        "verdict": _VERDICTS.get(tag, _VERDICTS["_default"]),
+                        "_src": c, "_snippet": c.get("snippet") or ""})
+    stories = _polish_stories_llm(stories, ctx)
+    for s in stories:
+        s.pop("_snippet", None)
+    stories[0]["verdict"] = _cap(
+        f"Lead story — {ctx['scores'].get('total', '')}/100 on today's rubric. "
+        f"The one to read first.", 90) if ctx["scores"].get("total") else stories[0]["verdict"]
+
+    # B-roll only where the v3 rule allows it, resolved after the skin is known.
+    if skin in ("neon-grid", "aurora"):
+        broll_dir = str(RUNS_DIR / ctx["run_id"] / "carousel")
+        for i, s in enumerate(stories):
+            path = _resolve_broll(s["_src"], broll_dir, i)
+            if path:
+                s["broll"] = path
+    for s in stories:
+        s.pop("_src", None)
+
+    now = datetime.now(timezone.utc)
+    brand_short = car.get("brand_short", (pb.get("name") or "PRISM").upper())
+    lead = stories[0]
+    lead_sents = _sentences(stories_src[0].get("snippet") or "")
+    deck = _cap(" ".join(lead_sents[:2]) if lead_sents else
+                f"{picked['title']} — the story leading today's conversation, "
+                f"picked from {len(ctx['candidates'])} candidates on the playbook rubric.", 300)
+    # contents n = story number (2..5), matching the donor's published specs
+    contents = [{"n": i + 1, "head": _cap(s["heading"], 64),
+                 "tease": _cap((s["bullets"] or [""])[0], 90)} for i, s in enumerate(stories[1:], start=1)]
+    take = _cap(f"“{picked['title']}”", 90)
     return {
-        "title": p["title"],
-        "subtitle": f"Today's lead story · {ctx['scores'].get('total', '')}/100 on the rubric · "
-                    f"{p.get('points', 0)} points, {p.get('num_comments', 0)} comments live",
-        "brand": theme.get("brand", "Prism"),
-        "theme": {"start": theme.get("start", "#38BDF8"),
-                  "end": theme.get("end", "#7C6CF0"),
-                  "accent": theme.get("accent", "#7C6CF0")},
-        "slides": slides,
+        "kicker": f"{brand_short} #{edition} · {now.strftime('%b %d').upper()}",
+        "title": car.get("title", pb.get("name", "Prism Digest")),
+        "date_line": f"{now.strftime('%A, %B %d').upper()} · ISSUE No. {edition}",
+        "cover_sub": f"5 things in {ctx['topic']} today — {now.strftime('%b %d')}.",
+        "lead": {"heading": lead["heading"], "deck": deck, "tag": lead["tag"]},
+        "contents": contents,
+        "slides": stories,
+        "recap": {"rows": [[s["heading"], s["verdict"]] for s in stories],
+                  "take": take,
+                  "take_sub": _cap(ctx["score_explanation"], 110)},
+        "cta": car.get("cta") or ["Tomorrow's digest,", "same time, same place.",
+                                  "Follow so you don't miss it."],
+        "persona": {"name": car.get("persona_name", "Venu Tati"),
+                    "brand": car.get("persona_brand", "Venu Tati · AI Dev Digest"),
+                    "position": car.get("persona_position",
+                                        "AI architect — I read the firehose so you don't have to.")},
+        "skin": skin,
+        "edition": edition,
+        "total_pages": 8,
     }
 
 
@@ -140,9 +349,11 @@ def make_carousel(ctx) -> dict:
     result = render_carousel_for_run(ctx["run_id"], spec)
     return {"type": "linkedin_carousel", "title": "LinkedIn carousel",
             "content": f"Carousel rendered ({result['slide_count']} slides, via {result['via']}). "
-                       f"Cover: {spec['title']}",
+                       f"Format v3 Front Page · edition #{spec['edition']} · skin {spec['skin']}. "
+                       f"Cover lead: {spec['lead']['heading']}",
             "pdf_path": result["pdf_path"], "png_paths": result["png_paths"],
             "slide_count": result["slide_count"], "rendered_via": result["via"],
+            "skin": spec["skin"], "edition": spec["edition"], "spec": spec,
             "citations": [c["url"] for c in ctx["candidates"][:5] if c.get("url")]}
 
 
