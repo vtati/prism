@@ -77,14 +77,15 @@ def make_reel_script(ctx) -> dict:
 # production format: fixed 8 slides = masthead cover (lead headline + deck +
 # ALSO IN TODAY'S DIGEST contents) / 5 story slides (why-it-matters bullets
 # + one-line verdict) / "Today in one screen" recap / person-led CTA.
-# Skin rotates by edition (see editions.py); Travel keeps the same structure
-# in its sunset skin. Bullets/verdicts are written from evidence — never raw
+# Skin is the playbook's fixed carousel skin (see editions.py): poster for
+# the Digest (standing default, Venugopal 2026-10-16–20), sunset for Travel.
+# Bullets/verdicts are written from evidence — never raw
 # engagement counts. An LLM polish pass rewrites them when a key is live.
 # ---------------------------------------------------------------------------
 import re
 from datetime import datetime, timezone
 
-from .editions import assign_edition, skin_for_edition
+from .editions import assign_edition, skin_for_playbook
 
 _TAG_HINTS = [
     ("REPO", ["github", "repo", "open-source", "open source", "library", "sdk"]),
@@ -234,11 +235,11 @@ def _carousel_spec(ctx) -> dict:
     domain = pb.get("domain", "")
     picked = ctx["picked"]
     edition = assign_edition(ctx["run_id"], pb.get("id", ""))
-    # Travel keeps its sunset skin family; everyone else rotates by edition.
-    if domain == "travel-news" or (pb.get("theme") or {}).get("gradient") == "sunset":
-        skin = "sunset"
-    else:
-        skin = skin_for_edition(edition)
+    # Skin comes from the playbook's carousel config: ai-news-gtm is fixed
+    # to poster (the standing Digest default, Venugopal 2026-10-16–20),
+    # travel-news to sunset; the edition rotation applies only when a
+    # playbook explicitly sets carousel.skin_mode: rotation.
+    skin = skin_for_playbook(pb, edition)
 
     # Five stories: the curator's pick leads; the rest follow by engagement.
     rest = [c for c in ctx["candidates"] if c.get("url") != picked.get("url")]
