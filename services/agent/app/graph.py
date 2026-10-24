@@ -99,8 +99,25 @@ def node_scout(state: PrismState) -> dict:
     rid = state["run_id"]
     pb = load_playbook(state["playbook_id"])
     emit(rid, "scout", "Scout", "started", f"Scout is rummaging for \"{state['topic']}\"…")
+
+    def _progress(channel: str, count: int) -> None:
+        # The sweep can run for minutes; one event per finished source
+        # family keeps the SSE stream (and the UI) visibly alive.
+        labels = {"tavily-search": "Tavily search", "hn-frontpage": "HN front page",
+                  "hn-algolia": "HN search", "reddit": "Reddit", "gdelt": "GDELT news wire",
+                  "trends": "Google Trends", "editorial": "Editorial feeds",
+                  "recorded-fixture": "Recorded fixture"}
+        if channel == "enrich":
+            msg = "Reading the top stories in full to build the evidence pack…"
+        elif channel == "merged":
+            msg = f"Pool merged — {count} unique candidates"
+        else:
+            msg = f"{labels.get(channel, channel)} — {count} candidates so far"
+        emit(rid, "scout", "Scout", "progress", msg,
+             {"channel": channel, "count": count})
+
     candidates, calls, stats = scout_search(state["topic"], pb.get("research") or {},
-                                            pb.get("sources") or [])
+                                            pb.get("sources") or [], progress=_progress)
     emit(rid, "scout", "Scout", "done",
          f"Scout gathered {len(candidates)} candidates via {', '.join(calls)}",
          {"tool_calls": calls, "count": len(candidates), "by_source": stats,

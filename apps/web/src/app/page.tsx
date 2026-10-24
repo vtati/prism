@@ -2,6 +2,7 @@
 import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { AGENTS, AGENT_MAP, MAKERS, CatAvatar, type AgentId } from "@/lib/agents";
 import { FIXTURES, PLAYBOOKS, type DemoEvent, type RunFixture } from "@/lib/fixtures";
+import { newTranslateCtx, translateApiEvent, type ApiEvent, type TranslateCtx } from "@/lib/translate";
 import GraphCanvas, { type NodeState } from "@/components/GraphCanvas";
 import AgentCard, { type AgentState } from "@/components/AgentCard";
 import ArtifactGallery from "@/components/ArtifactGallery";
@@ -31,11 +32,17 @@ export default function Page() {
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const esRef = useRef<EventSource | null>(null);
   const startedRef = useRef(false);
+  // live-stream liveness: updated by every SSE message AND every server
+  // ping; the watchdog falls back to demo only after real silence.
+  const lastActivityRef = useRef(0);
+  const watchdogRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const liveRunIdRef = useRef<string | null>(null);
+  const translateCtxRef = useRef<TranslateCtx>(newTranslateCtx("ai-news-gtm"));
 
   const running = phase === "running";
 
   const clearTimers = () => { timers.current.forEach(clearTimeout); timers.current = []; };
-  useEffect(() => () => { clearTimers(); esRef.current?.close(); }, []);
+  useEffect(() => () => { clearTimers(); if (watchdogRef.current) clearInterval(watchdogRef.current); esRef.current?.close(); }, []);
 
   // ---- API health check → demo mode auto-enable ----
   useEffect(() => {
@@ -76,12 +83,18 @@ export default function Page() {
       case "piece": setRevealed(prev => ({ ...prev, [ev.artifact]: Math.max(prev[ev.artifact] ?? 0, ev.index + 1) })); break;
       case "scores": setScores(ev.candidates); break;
       case "review": setReview({ verdict: ev.verdict, notes: ev.notes }); break;
-      case "phase": if (ev.phase === "awaiting") setPhase("awaiting"); break;
+      case "phase":
+        if (ev.phase === "awaiting") setPhase("awaiting");
+        if (ev.phase === "approved") setPhase("approved");
+        break;
     }
   }, [patch]);
 
+  const clearWatchdog = () => { if (watchdogRef.current) { clearInterval(watchdogRef.current); watchdogRef.current = null; } };
+
   const resetState = useCallback(() => {
-    clearTimers(); esRef.current?.close();
+    clearTimers(); clearWatchdog(); esRef.current?.close();
+    liveRunIdRef.current = null;
     setAgents(idleStates()); setEdges(new Set()); setRevealed({}); setScores(null); setReview(null); setElapsed(0);
   }, []);
 
@@ -91,24 +104,54 @@ export default function Page() {
     timers.current.push(setTimeout(() => setPhase(prev => (prev === "running" ? "awaiting" : prev)), fx.durationMs));
   }, [applyEvent]);
 
+  const fallbackToDemo = useCallback((fx: RunFixture, note: string) => {
+    startedRef.current = true; // don't let the auto-start effect restart it
+    setModeNote(note); setDemoMode(true); resetState(); runDemo(fx);
+  }, [resetState, runDemo]);
+
   const startRun = useCallback(async () => {
     resetState();
     const fx = FIXTURES[pbId];
     if (demoMode) { runDemo(fx); return; }
-    // live mode: create run + SSE, fall back to demo on any failure
+    // live mode: create run + SSE, fall back to demo only on real failure
     try {
       const r = await fetch(`${API}/runs`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ playbook_id: pbId, topic }) });
       if (!r.ok) throw new Error("create failed");
       const data = await r.json(); const id = data.id ?? data.run_id;
       if (!id) throw new Error("no run id");
+      liveRunIdRef.current = id;
+      translateCtxRef.current = newTranslateCtx(pbId);
       setPhase("running");
+      lastActivityRef.current = Date.now();
       const es = new EventSource(`${API}/runs/${id}/events`); esRef.current = es;
-      es.onmessage = (m) => { try { const ev = JSON.parse(m.data); if (ev && typeof ev === "object" && "kind" in ev) applyEvent(ev as DemoEvent); } catch { /* ignore */ } };
-      es.onerror = () => { es.close(); setModeNote("Live stream dropped — replaying recorded demo"); setDemoMode(true); resetState(); runDemo(fx); };
+      es.onmessage = (m) => {
+        lastActivityRef.current = Date.now();
+        try {
+          const ev = JSON.parse(m.data);
+          if (!ev || typeof ev !== "object") return;
+          if ("kind" in ev) { applyEvent(ev as DemoEvent); return; }
+          // live API vocabulary → theater vocabulary (see lib/translate)
+          translateApiEvent(ev as ApiEvent, translateCtxRef.current).forEach(applyEvent);
+        } catch { /* ignore malformed frame */ }
+      };
+      // server heartbeat: proof of life even when the run itself is quiet
+      es.addEventListener("ping", () => { lastActivityRef.current = Date.now(); });
+      // EventSource auto-reconnects (resuming via Last-Event-ID) — a single
+      // error is NOT a dead stream. The old code fell back to demo on the
+      // first onerror, which fired whenever the byte-silent Scout phase
+      // hit an idle timeout. Only the watchdog may declare the stream dead:
+      // >90s without any byte (events or pings) despite reconnect attempts.
+      es.onerror = () => { /* watchdog decides */ };
+      clearWatchdog();
+      watchdogRef.current = setInterval(() => {
+        if (Date.now() - lastActivityRef.current > 90000) {
+          fallbackToDemo(fx, "Live stream dropped — replaying recorded demo");
+        }
+      }, 5000);
     } catch {
       setModeNote("API unreachable — Demo Mode with a recorded run"); setDemoMode(true); runDemo(fx);
     }
-  }, [demoMode, pbId, topic, resetState, runDemo, applyEvent]);
+  }, [demoMode, pbId, topic, resetState, runDemo, applyEvent, fallbackToDemo]);
 
   // auto-start the recorded demo once we know we're in demo mode — instant wow for judges
   useEffect(() => {
@@ -124,9 +167,20 @@ export default function Page() {
     setEdges(prev => new Set(prev).add("reviewer-gate").add("gate-ship"));
     patch("supervisor", { status: "done", line: "Human approved! Shipping the Run Page. confetti is a state of mind. ✨" });
     setPhase("approved");
-    if (!demoMode) { try { await fetch(`${API}/runs/latest/approve`, { method: "POST" }); } catch { /* demo-safe */ } }
+    const id = liveRunIdRef.current;
+    if (!demoMode && id) {
+      try {
+        await fetch(`${API}/runs/${id}/approve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ decision: "approve" }) });
+      } catch { /* the run's ship event still arrives over SSE */ }
+    }
   };
-  const requestChanges = () => { setPhase("changes"); patch("reviewer", { line: "Noted. Sending it back — makers, you heard the human." }); };
+  const requestChanges = () => {
+    setPhase("changes"); patch("reviewer", { line: "Noted. Sending it back — makers, you heard the human." });
+    const id = liveRunIdRef.current;
+    if (!demoMode && id) {
+      fetch(`${API}/runs/${id}/approve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ decision: "changes", notes: "" }) }).catch(() => { /* demo-safe */ });
+    }
+  };
 
   const nodeStates: Record<string, NodeState> = useMemo(() => {
     const m: Record<string, NodeState> = { input: phase !== "idle" ? "done" : "idle", gate: phase === "awaiting" ? "active" : phase === "approved" ? "done" : "idle", ship: phase === "approved" ? "done" : "idle" };
