@@ -29,10 +29,38 @@ playbook:
     primary: "AI-curious professionals"
     tone: "clear, punchy, no hype"
   sources:
-    - tavily-search
+    - hn-frontpage
     - hn-algolia
+    - reddit
+    - gdelt
+    - google-trends
+    - editorial-rss
+    - tavily-search
     - fetch
-    - github-trending
+  # Research sweep — mirrors the production AI News pipeline
+  # (ai-reel/detect/viral_watch.py): every source family is key-free and
+  # failure-isolated; Scout queries ALL of them, merges + dedupes, and
+  # counts cross-source corroboration into the Verification score.
+  research:
+    prefilter_keywords: [ai, artificial intelligence, llm, llms, gpt, chatgpt, claude,
+      openai, anthropic, gemini, deepmind, nvidia, machine learning, neural,
+      agent, agents, chatbot, model, models, robotics, automation]
+    hn_frontpage: { limit: 60 }
+    hn_search: { limit: 12 }
+    tavily: true
+    reddit:
+      subreddits: [singularity, LocalLLaMA, artificial, ChatGPT]
+      limit: 40
+    gdelt:
+      keywords: [OpenAI, '"artificial intelligence"', Anthropic, Nvidia]
+      timespan: 24h
+      maxrecords: 50
+    trends: { geo: US }
+    editorial:
+      - { name: TLDR AI, url: "https://tldr.tech/api/rss/ai" }
+      - { name: The Rundown AI, url: "https://www.therundown.ai/feed" }
+      - { name: Simon Willison, url: "https://simonwillison.net/atom/everything/" }
+      - { name: Latent Space, url: "https://www.latent.space/feed" }
   rubric:
     - { key: audience_heat, label: "Audience Heat", weight: 40 }
     - { key: consequence, label: "Consequence", weight: 20 }
