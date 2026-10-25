@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import re
 from pathlib import Path
 from typing import TypedDict
 
@@ -29,6 +30,8 @@ class PrismState(TypedDict, total=False):
     picked: dict
     scores: dict
     score_explanation: str
+    selection: dict
+    angle: str
     style_pack: str
     duplicate: bool
     artifacts: dict
@@ -80,6 +83,123 @@ def score_candidate(c: dict, rubric: list[dict], past_urls: set, past_titles: se
         total += v
     scores["total"] = round(total, 1)
     return scores
+
+
+# ---------- selection quality (Curator) ----------
+# Eligibility is a hard gate BEFORE the winner is picked: a story must be
+# materially about the playbook's domain, judged over title + snippet.
+# Keyword lists live here, keyed by playbook id; when the OpenAI LLM is
+# live, one batched classification over the top-scored candidates wins
+# and the keyword test is only the fallback.
+_DOMAIN_LABELS = {"ai-news-gtm": "AI", "travel-news": "travel"}
+_DOMAIN_TERMS = {
+    "ai-news-gtm": [
+        "ai", "artificial intelligence", "llm", "llms", "large language model",
+        "large language models", "gpt", "chatgpt", "claude", "openai",
+        "anthropic", "gemini", "deepmind", "machine learning", "deep learning",
+        "neural", "neural network", "neural networks", "ai model", "ai models",
+        "ai agent", "ai agents", "agentic", "agent", "agents", "chatbot",
+        "chatbots", "on-device ai", "generative ai", "genai", "copilot",
+        "mistral", "llama", "perplexity", "hugging face", "ai-powered",
+        "ai powered", "ai chip", "ai chips",
+    ],
+    "travel-news": [
+        "flight", "flights", "airline", "airlines", "airport", "airports",
+        "airfare", "airfares", "travel", "traveler", "travelers", "vacation",
+        "vacations", "cruise", "cruises", "destination", "destinations",
+        "hotel", "hotels", "tourism", "tourist", "tourists", "itinerary",
+        "itineraries", "resort", "resorts", "fare", "fares", "trip", "trips",
+        "getaway", "visa", "passport",
+    ],
+}
+
+
+def _norm_text(s: str) -> str:
+    return re.sub(r"[-_]+", " ", (s or "").lower())
+
+
+def assess_eligibility(candidate: dict, playbook_id: str) -> bool:
+    """Keyword-path domain eligibility over title + snippet. Playbooks
+    without a term list are ungated (everything is eligible)."""
+    terms = _DOMAIN_TERMS.get(playbook_id)
+    if not terms:
+        return True
+    text = _norm_text(f"{candidate.get('title', '')} {candidate.get('snippet', '')}")
+    return any(re.search(rf"\b{re.escape(_norm_text(t))}\b", text) for t in terms)
+
+
+def _llm_eligibility(scored: list, playbook_id: str) -> dict | None:
+    """One batched LLM classification over the top 8 scored candidates.
+    Returns {scored_index: bool} or None when unavailable/unparseable —
+    the caller then falls back to the keyword test. LLM result wins."""
+    label = _DOMAIN_LABELS.get(playbook_id)
+    if not label:
+        return None
+    llm = get_llm()
+    if getattr(llm, "mode", None) != "openai":
+        return None
+    top = scored[:8]
+    listing = "\n\n".join(
+        f"[{i}] {c.get('title', '')}\n{(c.get('snippet') or '')[:300]}"
+        for i, (_s, c) in enumerate(top))
+    system = (f"You classify news stories for a {label} digest. For each story, decide whether it is "
+              f"STRICTLY and materially about {label} (the domain itself is a real angle of the "
+              f"story, not a passing mention in an unrelated story). "
+              f"Return ONLY a JSON list of booleans in the same order, e.g. [true, false].")
+    try:
+        raw = llm.generate(system, listing, "")
+    except Exception:
+        return None
+    if not raw:
+        return None
+    try:
+        data = json.loads(raw[raw.find("["): raw.rfind("]") + 1])
+    except Exception:
+        return None
+    out: dict[int, bool] = {}
+    if isinstance(data, list):
+        for i, v in enumerate(data[: len(top)]):
+            if isinstance(v, bool):
+                out[i] = v
+            elif isinstance(v, dict) and isinstance(v.get("eligible"), bool):
+                out[i] = v["eligible"]
+    return out or None
+
+
+def _fallback_angle(picked: dict) -> str:
+    """Angle without an LLM: the snippet's first sentence, trimmed;
+    the title when there is no usable snippet."""
+    snippet = " ".join((picked.get("snippet") or "").split())
+    if snippet:
+        first = re.split(r"(?<=[.!?])\s+", snippet)[0].strip()
+        if first:
+            if len(first) > 200:
+                first = first[:199].rsplit(" ", 1)[0].rstrip(" ,.;:") + "…"
+            return first
+    return (picked.get("title") or "").strip()
+
+
+def derive_angle(picked: dict, playbook_id: str) -> str:
+    """One-line headline angle for the winner. LLM when live (<=16 words,
+    no hype, no score); grounded fallback otherwise."""
+    fallback = _fallback_angle(picked)
+    llm = get_llm()
+    if getattr(llm, "mode", "fallback") == "fallback":
+        return fallback
+    label = _DOMAIN_LABELS.get(playbook_id, "the playbook's domain")
+    system = (f"Frame the story as a one-line {label} headline: at most 16 words, "
+              f"no hype, no exclamation, never mention any score or rating. "
+              f"Return only the headline.")
+    user = f"Title: {picked.get('title', '')}\nSnippet: {(picked.get('snippet') or '')[:400]}"
+    try:
+        out = llm.generate(system, user, fallback)
+    except Exception:
+        return fallback
+    out = (out or "").strip().strip('"').splitlines()[0].strip() if out else ""
+    if not out:
+        return fallback
+    words = out.split()
+    return " ".join(words[:16]) if len(words) > 16 else out
 
 
 # ---------- nodes ----------
@@ -136,7 +256,56 @@ def node_curator(state: PrismState) -> dict:
     past_titles = {r.get("title") for r in past}
     scored = [(score_candidate(c, pb["rubric"], past_urls, past_titles), c) for c in state["candidates"]]
     scored.sort(key=lambda x: x[0]["total"], reverse=True)
-    scores, picked = scored[0]
+
+    # Selection gate: in score order, skip ineligible stories and stories
+    # below the playbook's rubric floor; the first candidate passing both
+    # wins. If none pass, fall back to the top eligible story, else the
+    # top story overall — selection never crashes a run.
+    sel_cfg = pb.get("selection") or {}
+    floor_key = sel_cfg.get("floor_key")
+    floor_min = sel_cfg.get("floor_min")
+    label = _DOMAIN_LABELS.get(pb["id"], "the domain")
+    llm_map = _llm_eligibility(scored, pb["id"])
+    if llm_map is not None:
+        eligibility_source = "llm"
+    elif pb["id"] in _DOMAIN_TERMS:
+        eligibility_source = "keywords"
+    else:
+        eligibility_source = "none"
+
+    def _eligible(idx: int, cand: dict) -> bool:
+        if llm_map is not None and idx in llm_map:
+            return bool(llm_map[idx])
+        return assess_eligibility(cand, pb["id"])
+
+    passed_over: list[dict] = []
+    winner = None
+    for idx, (s, c) in enumerate(scored):
+        if not _eligible(idx, c):
+            passed_over.append({"title": c.get("title"),
+                                "reason": f"ineligible — not materially about {label}"})
+            continue
+        if floor_key and floor_min is not None and s.get(floor_key, 0) < floor_min:
+            passed_over.append({"title": c.get("title"),
+                                "reason": f"below {floor_key} floor {floor_min}"})
+            continue
+        winner = (s, c)
+        break
+    fallback = None
+    if winner is None:
+        eligible = [(s, c) for idx, (s, c) in enumerate(scored) if _eligible(idx, c)]
+        if eligible:
+            winner, fallback = eligible[0], "top_eligible"
+        else:
+            winner, fallback = scored[0], "top_overall"
+    selection = {"passed_over": passed_over, "floor_key": floor_key,
+                 "floor_min": floor_min, "eligibility": eligibility_source,
+                 "fallback": fallback}
+
+    scores, picked_src = winner
+    angle = derive_angle(picked_src, pb["id"])
+    picked = dict(picked_src)
+    picked["angle"] = angle
     parts = ", ".join(f"{r['label']} {scores.get(r['key'], 0)}/{r['weight']}" for r in pb["rubric"])
     expl = (f"\"{picked['title']}\" scored {scores['total']}/100 ({parts}) across "
             f"{len(scored)} candidates, with {picked.get('points', 0)} points and "
@@ -144,9 +313,16 @@ def node_curator(state: PrismState) -> dict:
     if (picked.get("corroboration") or 1) >= 2:
         expl += (f" Corroborated by {picked['corroboration']} independent sources "
                  f"({picked.get('source', '')}) — verification boosted.")
+    if passed_over:
+        detail = "; ".join(f"\"{p['title']}\" ({p['reason']})" for p in passed_over)
+        expl += f" Passed over {len(passed_over)} higher-scored stories: {detail}."
+    if fallback:
+        expl += f" No candidate cleared the selection gate; fell back to the {fallback.replace('_', ' ')}."
     emit(rid, "curator", "Curator", "done", f"Curator picked the lead story. {expl}",
-         {"scores": scores, "picked": picked["title"]})
-    return {"picked": picked, "scores": scores, "score_explanation": expl, "status": "archiving"}
+         {"scores": scores, "picked": picked["title"], "angle": angle,
+          "passed_over": passed_over, "selection": selection})
+    return {"picked": picked, "scores": scores, "score_explanation": expl,
+            "selection": selection, "angle": angle, "status": "archiving"}
 
 
 def node_archivist(state: PrismState) -> dict:
@@ -276,12 +452,15 @@ def node_ship(state: PrismState) -> dict:
     if approved:
         record_past_run({"run_id": rid, "playbook_id": pb["id"],
                          "title": state["picked"].get("title"), "url": state["picked"].get("url")})
+    public_base = os.environ.get("PUBLIC_WEB_BASE", "https://prism.genalphalabs.com").rstrip("/")
+    run_page_url = f"{public_base}/runs/{pb['id']}-latest"
     ship = {"status": "shipped" if approved else "exported_not_approved",
             "run_page": str(page_path), "bundle": str(run_dir / "bundle.json"),
-            "crosscast_payload": str(run_dir / "crosscast_payload.json")}
+            "crosscast_payload": str(run_dir / "crosscast_payload.json"),
+            "run_page_url": run_page_url}
     emit(rid, "ship", "Ship", "done",
          f"Run Page exported: {page_path} · Crosscast payload recorded (stub, not sent)",
-         {"ship": ship})
+         {"ship": ship, "run_page_url": run_page_url})
     return {"ship": ship, "status": ship["status"]}
 
 

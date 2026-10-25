@@ -58,6 +58,9 @@ playbook:
     - { key: urgency, label: "Urgency", weight: 20 }
     - { key: seasonality, label: "Seasonality", weight: 20 }
     - { key: verification, label: "Verification", weight: 25 }
+  selection:
+    floor_key: deal_value
+    floor_min: 10
   knowledge:
     - brand-voice.md
     - past-runs/

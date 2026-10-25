@@ -14,18 +14,20 @@ import sqlite3
 import threading
 import time
 import uuid
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import FileResponse, StreamingResponse
 from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.types import Command
 from pydantic import BaseModel
 
-from .config import CHECKPOINT_DB
+from .config import CHECKPOINT_DB, RUNS_DIR
 from .events import emit, get_events
 from .graph import build_graph
 from .llm import get_llm
+from .makers import _render_direct
 from .playbooks import list_playbooks, load_playbook
 
 app = FastAPI(title="Prism Agent API", version="0.1.0")
@@ -121,6 +123,92 @@ def _clean(vals: dict) -> dict:
     return out
 
 
+# ---------- carousel artifact serving ----------
+
+def _load_run_state(run_id: str) -> dict | None:
+    """The run's state dict, resolved the same way GET /runs/{run_id}
+    resolves it: the in-process registry first (refreshed from the
+    checkpoint), else the checkpoint snapshot alone (server restart).
+    None when the run is unknown."""
+    with _lock:
+        run = _runs.get(run_id)
+    if run is not None:
+        state = run.get("state") or {}
+        try:
+            snap = _graph.get_state(_config(run_id))
+            if snap and snap.values:
+                state = _clean(snap.values)
+        except Exception:
+            pass
+        return state
+    try:
+        snap = _graph.get_state(_config(run_id))
+        if snap and snap.values:
+            return _clean(snap.values)
+    except Exception:
+        pass
+    return None
+
+
+def find_carousel_artifact(artifacts: dict) -> dict | None:
+    """The carousel artifact in a run's artifacts dict: by its maker key
+    ('linkedin_carousel') first, else any artifact of that type."""
+    arts = artifacts or {}
+    art = arts.get("linkedin_carousel")
+    if isinstance(art, dict):
+        return art
+    for v in arts.values():
+        if isinstance(v, dict) and v.get("type") == "linkedin_carousel":
+            return v
+    return None
+
+
+def _regenerate_carousel(artifact: dict, run_id: str) -> dict | None:
+    """Re-render from the artifact's retained spec via the direct
+    renderer into RUNS_DIR/<run_id>/carousel. None when impossible."""
+    spec = artifact.get("spec")
+    if not spec:
+        return None
+    out_dir = RUNS_DIR / run_id / "carousel"
+    out_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        return _render_direct(spec, str(out_dir))
+    except Exception:
+        return None
+
+
+def resolve_carousel_file(artifacts: dict, run_id: str, slide: int | None = None) -> Path | None:
+    """Filesystem path of the carousel PDF (slide=None) or of the 1-based
+    slide PNG. When the recorded file is missing, the carousel is
+    regenerated from the artifact's retained spec and the fresh path is
+    returned. None when there is no carousel artifact, the slide is out
+    of range, or no file can be produced."""
+    art = find_carousel_artifact(artifacts)
+    if art is None:
+        return None
+    if slide is not None:
+        if slide < 1:
+            return None
+        paths = art.get("png_paths") or []
+        if slide <= len(paths) and Path(paths[slide - 1]).is_file():
+            return Path(paths[slide - 1])
+        result = _regenerate_carousel(art, run_id)
+        if result:
+            paths = result.get("png_paths") or []
+            if slide <= len(paths) and Path(paths[slide - 1]).is_file():
+                return Path(paths[slide - 1])
+        return None
+    pdf = art.get("pdf_path")
+    if pdf and Path(pdf).is_file():
+        return Path(pdf)
+    result = _regenerate_carousel(art, run_id)
+    if result:
+        pdf = result.get("pdf_path")
+        if pdf and Path(pdf).is_file():
+            return Path(pdf)
+    return None
+
+
 @app.get("/health")
 def health():
     llm = get_llm()
@@ -178,6 +266,28 @@ def get_run(run_id: str):
     except Exception:
         pass
     return {**run, "events": get_events(run_id)}
+
+
+@app.get("/runs/{run_id}/carousel.pdf")
+def get_carousel_pdf(run_id: str):
+    state = _load_run_state(run_id)
+    if state is None:
+        raise HTTPException(404, "run not found")
+    path = resolve_carousel_file(state.get("artifacts") or {}, run_id)
+    if path is None:
+        raise HTTPException(404, "no carousel artifact for run")
+    return FileResponse(path, media_type="application/pdf", filename="carousel.pdf")
+
+
+@app.get("/runs/{run_id}/carousel/slides/{n}.png")
+def get_carousel_slide(run_id: str, n: int):
+    state = _load_run_state(run_id)
+    if state is None:
+        raise HTTPException(404, "run not found")
+    path = resolve_carousel_file(state.get("artifacts") or {}, run_id, slide=n)
+    if path is None:
+        raise HTTPException(404, "slide not found")
+    return FileResponse(path, media_type="image/png", filename=f"slide-{n}.png")
 
 
 HEARTBEAT_S = 15.0  # SSE ping cadence: the stream never goes byte-silent

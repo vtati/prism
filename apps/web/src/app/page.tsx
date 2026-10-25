@@ -6,7 +6,9 @@ import { newTranslateCtx, translateApiEvent, type ApiEvent, type TranslateCtx } 
 import GraphCanvas, { type NodeState } from "@/components/GraphCanvas";
 import AgentCard, { type AgentState } from "@/components/AgentCard";
 import ArtifactGallery from "@/components/ArtifactGallery";
+import ResearchLedger from "@/components/ResearchLedger";
 import ShipRoom, { type Phase } from "@/components/ShipRoom";
+import { angleFromRunState, gateDataFromFixture, gateDataFromRunState, type GateData, type PerArtifactCheck } from "@/lib/runState";
 
 const API = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
 const CORE: AgentId[] = ["supervisor", "scout", "curator", "archivist", "reviewer"];
@@ -27,7 +29,18 @@ export default function Page() {
   const [edges, setEdges] = useState<Set<string>>(new Set());
   const [revealed, setRevealed] = useState<Record<string, number>>({});
   const [scores, setScores] = useState<RunFixture["candidates"] | null>(null);
-  const [review, setReview] = useState<{ verdict: string; notes: string[] } | null>(null);
+  const [review, setReview] = useState<{ verdict: string; notes: string[]; perArtifact?: Record<string, PerArtifactCheck> } | null>(null);
+  // Research Ledger: latest count per Scout channel — accumulates as
+  // progress events arrive and stays up after Scout finishes.
+  const [ledger, setLedger] = useState<Record<string, number>>({});
+  // Gate Review Panel state: the live run id, the artifact roster from
+  // the gate event (fallback), per-artifact meta from maker events, and
+  // the raw GET /runs/{id} response the panel is built from.
+  const [liveRunId, setLiveRunId] = useState<string | null>(null);
+  const [gateArtifactNames, setGateArtifactNames] = useState<string[]>([]);
+  const [artifactMeta, setArtifactMeta] = useState<Record<string, { slideCount?: number }>>({});
+  const [runStateRaw, setRunStateRaw] = useState<unknown>(null);
+  const shipSeenRef = useRef(false);
   const [elapsed, setElapsed] = useState(0);
   const timers = useRef<ReturnType<typeof setTimeout>[]>([]);
   const esRef = useRef<EventSource | null>(null);
@@ -82,7 +95,12 @@ export default function Page() {
       case "edge": setEdges(prev => new Set(prev).add(ev.edge)); break;
       case "piece": setRevealed(prev => ({ ...prev, [ev.artifact]: Math.max(prev[ev.artifact] ?? 0, ev.index + 1) })); break;
       case "scores": setScores(ev.candidates); break;
-      case "review": setReview({ verdict: ev.verdict, notes: ev.notes }); break;
+      case "review": setReview({ verdict: ev.verdict, notes: ev.notes, perArtifact: ev.perArtifact }); break;
+      case "ledger": setLedger(prev => ({ ...prev, [ev.channel]: ev.count })); break;
+      case "gate": setGateArtifactNames(ev.artifacts); break;
+      case "artifactMeta":
+        setArtifactMeta(prev => ({ ...prev, [ev.artifact]: { slideCount: ev.slideCount ?? prev[ev.artifact]?.slideCount } }));
+        break;
       case "phase":
         if (ev.phase === "awaiting") setPhase("awaiting");
         if (ev.phase === "approved") setPhase("approved");
@@ -95,7 +113,9 @@ export default function Page() {
   const resetState = useCallback(() => {
     clearTimers(); clearWatchdog(); esRef.current?.close();
     liveRunIdRef.current = null;
+    shipSeenRef.current = false;
     setAgents(idleStates()); setEdges(new Set()); setRevealed({}); setScores(null); setReview(null); setElapsed(0);
+    setLedger({}); setLiveRunId(null); setGateArtifactNames([]); setArtifactMeta({}); setRunStateRaw(null);
   }, []);
 
   const runDemo = useCallback((fx: RunFixture) => {
@@ -120,6 +140,7 @@ export default function Page() {
       const data = await r.json(); const id = data.id ?? data.run_id;
       if (!id) throw new Error("no run id");
       liveRunIdRef.current = id;
+      setLiveRunId(id);
       translateCtxRef.current = newTranslateCtx(pbId);
       setPhase("running");
       lastActivityRef.current = Date.now();
@@ -152,6 +173,62 @@ export default function Page() {
       setModeNote("API unreachable — Demo Mode with a recorded run"); setDemoMode(true); runDemo(fx);
     }
   }, [demoMode, pbId, topic, resetState, runDemo, applyEvent, fallbackToDemo]);
+
+  // ---- Gate Review Panel: fetch the full run state (artifacts + review
+  // + ship) from GET /runs/{id}. At the gate the run is paused, so one
+  // fetch (+ a retry for checkpoint lag) is enough; after approval, poll
+  // until the ship block lands so the Run Page URL is the real one. ----
+  const fetchRunState = useCallback(async () => {
+    const id = liveRunIdRef.current;
+    if (!id || demoMode) return;
+    try {
+      const r = await fetch(`${API}/runs/${id}`);
+      if (!r.ok) return;
+      const data: unknown = await r.json();
+      setRunStateRaw(data);
+      const gd = gateDataFromRunState(data);
+      if (gd?.shipStatus || gd?.shipRunPageUrl) shipSeenRef.current = true;
+      const angle = angleFromRunState(data);
+      if (angle) {
+        setScores(prev => prev ? prev.map((c, i) => (i === 0 ? { ...c, angle } : c)) : prev);
+      }
+    } catch { /* panel falls back to the gate-event roster + SSE review */ }
+  }, [demoMode]);
+
+  useEffect(() => {
+    if (phase !== "awaiting" || demoMode) return;
+    fetchRunState();
+    const t = setTimeout(fetchRunState, 2500);
+    return () => clearTimeout(t);
+  }, [phase, demoMode, fetchRunState]);
+
+  useEffect(() => {
+    if (phase !== "approved" || demoMode || shipSeenRef.current) return;
+    fetchRunState();
+    let tries = 0;
+    const iv = setInterval(() => {
+      tries += 1;
+      if (shipSeenRef.current || tries > 40) { clearInterval(iv); return; }
+      fetchRunState();
+    }, 3000);
+    return () => clearInterval(iv);
+  }, [phase, demoMode, fetchRunState]);
+
+  // Panel data: live runs build from the fetched state (gate-event roster
+  // + maker-event slide counts + SSE review as fallbacks); demo runs
+  // build from the fixture, and ShipRoom hides the PDF/slide routes.
+  const gateData: GateData | null = useMemo(() => {
+    if (!demoMode && liveRunId) {
+      const slideCounts: Record<string, number> = {};
+      Object.entries(artifactMeta).forEach(([k, v]) => { if (v.slideCount != null) slideCounts[k] = v.slideCount; });
+      return gateDataFromRunState(runStateRaw, {
+        artifactNames: gateArtifactNames,
+        slideCounts,
+        fallbackReview: review,
+      }) ?? (review ? { artifacts: [], review } : null);
+    }
+    return gateDataFromFixture(fixture, review);
+  }, [demoMode, liveRunId, runStateRaw, gateArtifactNames, artifactMeta, review, fixture]);
 
   // auto-start the recorded demo once we know we're in demo mode — instant wow for judges
   useEffect(() => {
@@ -245,12 +322,16 @@ export default function Page() {
             <div className="agents">
               {CORE.map(id => <AgentCard key={id} agent={AGENT_MAP[id]} state={agents[id]} />)}
             </div>
+            <ResearchLedger ledger={ledger} />
             {scores && (
               <div className="scores">
                 <h3 style={{ margin: "4px 0 2px", fontSize: 14.5 }}>📊 Otto's Scoreboard — why this story won</h3>
                 {scores.map((c, i) => (
-                  <div key={c.title} className={`scoreRow ${i === 0 ? "winner" : ""}`}>
-                    <span className="t">{i === 0 ? "🏆 " : ""}{c.title}</span>
+                  <div key={`${c.title}-${i}`} className={`scoreRow ${i === 0 ? "winner" : ""}`}>
+                    <span className="t">
+                      {i === 0 ? "🏆 " : ""}{c.angle ?? c.title}
+                      {c.angle && c.angle !== c.title && <span className="srcLine">📰 Source: {c.title}</span>}
+                    </span>
                     <span className="track"><span className="fill" style={{ display: "block", width: `${c.score}%`, background: i === 0 ? "var(--g-main)" : "#C6CBE4" }} /></span>
                     <span className="n">{c.score}</span>
                     <span className="note">{c.note}</span>
@@ -290,6 +371,8 @@ export default function Page() {
 
       {/* ================= ship room ================= */}
       <ShipRoom phase={phase} review={review} runPageTitle={fixture.runPageTitle} playbookName={pb.name} topic={topic}
+        gate={gateData} runId={liveRunId} apiBase={API} live={!demoMode && !!liveRunId}
+        runPageUrl={gateData?.shipRunPageUrl ?? null}
         onApprove={approve} onChanges={requestChanges} onReset={() => { resetState(); setPhase("idle"); }} />
 
       <footer>Prism Studio · LangGraph + LangChain + MCP multi-agent GTM · Same agents, any Playbook — built for Gen Academy Week 3 🎓</footer>
