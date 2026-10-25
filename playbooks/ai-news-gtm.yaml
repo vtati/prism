@@ -66,6 +66,9 @@ playbook:
     - { key: consequence, label: "Consequence", weight: 20 }
     - { key: verification, label: "Verification", weight: 20 }
     - { key: novelty, label: "Novelty", weight: 20 }
+  selection:
+    floor_key: consequence
+    floor_min: 10
   knowledge:
     - brand-voice.md
     - past-runs/

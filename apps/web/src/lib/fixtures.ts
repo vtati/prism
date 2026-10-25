@@ -38,7 +38,7 @@ export interface Artifact {
   slides?: Slide[];          // carousel slides, revealed one by one
   verdict: string;           // reviewer note for this artifact
 }
-export interface Candidate { title: string; score: number; heat: number; note: string; }
+export interface Candidate { title: string; score: number; heat: number; note: string; angle?: string; }
 export interface ToolCall { name: string; detail: string; result: string; }
 
 export type DemoEvent =
@@ -49,7 +49,10 @@ export type DemoEvent =
   | { t: number; kind: "edge"; edge: string }
   | { t: number; kind: "piece"; artifact: string; index: number }
   | { t: number; kind: "scores"; candidates: Candidate[] }
-  | { t: number; kind: "review"; verdict: "PASS" | "REVISE"; notes: string[] }
+  | { t: number; kind: "review"; verdict: "PASS" | "REVISE"; notes: string[]; perArtifact?: Record<string, { grounded?: boolean; ok?: boolean }> }
+  | { t: number; kind: "ledger"; channel: string; count: number }
+  | { t: number; kind: "gate"; artifacts: string[] }
+  | { t: number; kind: "artifactMeta"; artifact: string; slideCount?: number }
   | { t: number; kind: "phase"; phase: "running" | "awaiting" | "approved" };
 
 export interface RunFixture {
@@ -67,6 +70,7 @@ const P = (t: number, agent: AgentId, value: number): DemoEvent => ({ t, kind: "
 const E = (t: number, edge: string): DemoEvent => ({ t, kind: "edge", edge });
 const PC = (t: number, artifact: string, index: number): DemoEvent => ({ t, kind: "piece", artifact, index });
 const L = (t: number, agent: AgentId, line: string): DemoEvent => ({ t, kind: "line", agent, line });
+const LG = (t: number, channel: string, count: number): DemoEvent => ({ t, kind: "ledger", channel, count });
 
 export const AI_FIXTURE: RunFixture = {
   runPageTitle: "Agents Went Mainstream — AI Daily Brief Suite",
@@ -127,10 +131,14 @@ AI_FIXTURE.events = [
   E(1400, "supervisor-scout"),
   A(1500, "scout", "Rummaging through the internet's couch cushions…"),
   T(1900, "scout", { name: "mcp · tavily-search", detail: "search('AI agents launch', news, 24h)", result: "14 sources · 6 candidate stories" }),
+  LG(1950, "tavily-search", 14),
   P(2600, "scout", 45),
   T(3300, "scout", { name: "mcp · hn-algolia", detail: "top stories, agent keywords", result: "Top candidate at 1,240 points and climbing" }),
+  LG(3350, "hn-algolia", 6),
   P(4200, "scout", 78),
   T(4700, "scout", { name: "mcp · fetch", detail: "extract 3 primary sources", result: "Full text captured · quotes verified verbatim" }),
+  LG(4750, "enrich", 3),
+  LG(5550, "merged", 6),
   D(5600, "scout", "Found gold: 14 sources, 6 candidates, zero rumours."),
   E(5800, "scout-curator"),
   A(5900, "curator", "Scoring time. Sentiment is not a metric, people."),
@@ -224,7 +232,10 @@ TRAVEL_FIXTURE.events = [
   E(1300, "supervisor-scout"),
   A(1400, "scout", "Trading the newsroom for the departure board…"),
   T(1800, "scout", { name: "mcp · tavily-search", detail: "search('flight deals this week', travel)", result: "9 sources · 3 candidate deals" }),
+  LG(1850, "tavily-search", 9),
   T(3200, "scout", { name: "mcp · fetch", detail: "fare trackers ×2, cross-check prices", result: "Lisbon fare confirmed on both trackers" }),
+  LG(3250, "enrich", 2),
+  LG(4750, "merged", 3),
   D(4800, "scout", "A 41% drop to Lisbon. I already packed a tiny suitcase."),
   E(5000, "scout-curator"),
   A(5100, "curator", "Deals get scored like stories. Fake sales get binned like shrug stories."),

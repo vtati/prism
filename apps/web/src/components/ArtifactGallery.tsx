@@ -7,7 +7,7 @@ export function mdLite(text: string) {
     ? <strong key={i}>{p.slice(2, -2)}</strong>
     : <span key={i}>{p}</span>);
 }
-function Para({ text }: { text: string }) {
+export function Para({ text }: { text: string }) {
   return <p>{text.split("\n").map((line, i, arr) => (
     <span key={i}>{mdLite(line)}{i < arr.length - 1 && <br />}</span>
   ))}</p>;
