@@ -293,6 +293,20 @@ def _resolve_broll(candidate: dict, out_dir: str, idx: int) -> str | None:
         return None
 
 
+def _display_headline(picked: dict) -> str:
+    """Cover headline: the curator's framed angle for the winner; fallback
+    is the raw title truncated at a word boundary (never the full raw
+    title — it collapsed the Oct 25 cover)."""
+    angle = (picked.get("angle") or "").strip()
+    if angle:
+        return _cap(angle, 110)
+    title = (picked.get("title") or "").strip()
+    if len(title) <= 80:
+        return title
+    cut = title[:80].rsplit(" ", 1)[0].rstrip(" –—-|·:")
+    return (cut + "…") if cut else title[:80]
+
+
 def _carousel_spec(ctx) -> dict:
     pb = ctx["playbook"]
     car = pb.get("carousel") or {}
@@ -356,7 +370,8 @@ def _carousel_spec(ctx) -> dict:
         "title": car.get("title", pb.get("name", "Prism Digest")),
         "date_line": f"{now.strftime('%A, %B %d').upper()} · ISSUE No. {edition}",
         "cover_sub": f"5 things in {ctx['topic']} today — {now.strftime('%b %d')}.",
-        "lead": {"heading": lead["heading"], "deck": deck, "tag": lead["tag"]},
+        "lead": {"heading": lead["heading"], "deck": deck, "tag": lead["tag"],
+                 "display_headline": _display_headline(picked)},
         "contents": contents,
         "slides": stories,
         "recap": {"rows": [[s["heading"], s["verdict"]] for s in stories],
@@ -418,6 +433,7 @@ def make_carousel(ctx) -> dict:
                        f"Format v3 Front Page · edition #{spec['edition']} · skin {spec['skin']}. "
                        f"Cover lead: {spec['lead']['heading']}",
             "pdf_path": result["pdf_path"], "png_paths": result["png_paths"],
+            "qa": result.get("qa"),
             "slide_count": result["slide_count"], "rendered_via": result["via"],
             "skin": spec["skin"], "edition": spec["edition"], "spec": spec,
             "citations": [c["url"] for c in ctx["candidates"][:5] if c.get("url")]}
