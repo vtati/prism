@@ -163,7 +163,7 @@ def fit(draw, text, name, max_w, start, min_s=24):
         f = font(name, s)
         if max(draw.textbbox((0,0), ln, font=f)[2] for ln in text.split("\n")) <= max_w:
             return f
-        s -= 4
+        s = max(min_s, s - 4)
     return font(name, min_s)
 
 def ellipsize(d, text, f, max_w):
@@ -338,7 +338,7 @@ def _heading(d, text, fname, size, max_w, fill, x, y, min_s=30, qa_key=None, lab
     s, f = size, font(fname, size)
     lines = wrap(d, text, f, max_w)
     while len(lines) > 2 and s > min_s:
-        s -= 4; f = font(fname, s); lines = wrap(d, text, f, max_w)
+        s = max(min_s, s - 4); f = font(fname, s); lines = wrap(d, text, f, max_w)
     if len(lines) > 2:
         words = text.split()
         while words and len(lines) > 2:
