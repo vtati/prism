@@ -304,6 +304,25 @@ THEMES = {
         "flat": True, "layout": "frontpage",
         "hair": (226, 205, 182),
     },
+    "pastel": {  # Prism deck family (Venugopal's template, 2026-10-28): soft
+        # pastel blobs on near-white, navy Poppins type, per-slot dash bullets,
+        # white rounded cards. Travel's fixed skin; AI News stays poster.
+        "bg": [(248, 248, 253), (248, 248, 253), (248, 248, 253)],
+        "glows": [],
+        "text": (30, 30, 64), "sub": (76, 76, 108),
+        "kicker": (124, 108, 240), "card": (255, 255, 255, 0), "ring": (124, 108, 240),
+        "flat": True, "layout": "pastel",
+        "hair": (219, 219, 238),
+        "pink": (236, 72, 153), "muted": (138, 138, 168),
+        "blob_sky": (219, 238, 255), "blob_pink": (253, 227, 241),
+        "blob_lav": (232, 230, 250),
+        "slot_accents": {"DESTINATIONS": (236, 72, 153), "DEALS": (16, 185, 129),
+                         "ROUTES": (14, 165, 233), "GUIDES": (124, 108, 240),
+                         "NEWS": (249, 115, 22),
+                         "PRODUCT": (236, 72, 153), "FRAMEWORKS": (14, 165, 233),
+                         "REPO": (16, 185, 129), "RESEARCH": (124, 108, 240),
+                         "ECOSYSTEM": (249, 115, 22)},
+    },
 }
 
 ROTATION = ["frontpage", "terminal", "neon-grid", "poster", "aurora"]
@@ -378,6 +397,8 @@ def _blend(c, bgc, f):
     return tuple(int(c[i]*f + bgc[i]*(1-f)) for i in range(3))
 
 MB, M, SB, S, SRFB, SRF = "DejaVuSansMono-Bold", "DejaVuSansMono", "DejaVuSans-Bold", "DejaVuSans", "DejaVuSerif-Bold", "DejaVuSerif"
+# Poppins (OFL, bundled) — the pastel deck family only; other skins keep DejaVu.
+PBX, PB, PSB, PM, PR = "Poppins-ExtraBold", "Poppins-Bold", "Poppins-SemiBold", "Poppins-Medium", "Poppins-Regular"
 
 # ---------------- TERMINAL ----------------
 
@@ -1029,11 +1050,255 @@ def _aurora_cta2(t, spec, total, npages):
     _lockup2(img, t, npages, total, t["text"], t["ring"], t["sub"], num_font=font(M, 26))
     return _finish(img)
 
+# ---------------- PASTEL DECK x FRONTPAGE ----------------
+# Venugopal's attached template (2026-10-28): near-white canvas, soft pastel
+# blobs, a gradient top bar, navy Poppins headlines, violet kickers, dash
+# bullets in the slot accent, white rounded cards, hairline footer with the
+# persona name + page count. Same v3 spec/structure as every other family.
+
+def _pastel_bg(t):
+    img = Image.new("RGBA", (W, H), tuple(list(t["bg"][1]) + [255]))
+    d = ImageDraw.Draw(img)
+    d.ellipse((-300, -560, 560, 300), fill=tuple(list(t["blob_sky"]) + [255]))
+    d.ellipse((700, -480, 1420, 240), fill=tuple(list(t["blob_pink"]) + [255]))
+    d.ellipse((90, 1060, 990, 1960), fill=tuple(list(t["blob_lav"]) + [255]))
+    bar = _hgrad(W // 2, 16, (56, 189, 248), (139, 124, 246)).convert("RGBA")
+    img.paste(bar, (0, 0))
+    bar2 = _hgrad(W - W // 2, 16, (139, 124, 246), (236, 72, 153)).convert("RGBA")
+    img.paste(bar2, (W // 2, 0))
+    return img
+
+
+def _pastel_footer(img, t, idx, total):
+    d = ImageDraw.Draw(img)
+    d.line((80, 1206, W - 80, 1206), fill=t["hair"], width=2)
+    f = font(PM, 25)
+    d.text((80, 1226), _PERSONA_NAME, font=f, fill=t["muted"])
+    _track(d, 80, 1226, _PERSONA_NAME, f, "footer-name")
+    num = f"{idx:02d} / {total:02d}"
+    d.text((W - 80, 1226), num, font=f, fill=t["muted"], anchor="ra")
+    _track(d, W - 80, 1226, num, f, "footer-num", anchor="ra")
+
+
+def _pastel_accent(t, tag):
+    return (t.get("slot_accents") or {}).get(tag or "", t["kicker"])
+
+
+def _wrap_cap(d, text, f, max_w, max_lines):
+    """Wrap to at most max_lines, truncating the tail at a word boundary
+    with an ellipsis (never a mid-word cut, never an overflow)."""
+    lines = wrap(d, text, f, max_w)
+    if len(lines) <= max_lines:
+        return lines
+    kept = lines[:max_lines - 1]
+    rest = " ".join(lines[max_lines - 1:])
+    kept.append(ellipsize(d, rest, f, max_w))
+    return kept
+
+
+def _pastel_headline(d, text, x, y, max_w, start, min_s, max_lines, fill,
+                     qa_key=None, label="headline"):
+    """Poppins headline: shrink until it fits max_lines; at the floor,
+    truncate the last line at a word boundary. Returns the bottom y."""
+    s = start
+    while s > min_s:
+        f = font(PBX, s)
+        if len(wrap(d, text, f, max_w)) <= max_lines:
+            break
+        s = max(min_s, s - 4)
+    f = font(PBX, s)
+    lines = _wrap_cap(d, text, f, max_w, max_lines)
+    lh = int(s * 1.14)
+    for ln in lines:
+        d.text((x, y), ln, font=f, fill=fill)
+        _track(d, x, y, ln, f, label)
+        y += lh
+    if qa_key:
+        _QA[qa_key] = s
+    return y
+
+
+def _pastel_cover(t, spec, total):
+    img = _pastel_bg(t); d = ImageDraw.Draw(img)
+    kf = font(PB, 30)
+    d.text((80, 92), spec["kicker"], font=kf, fill=t["kicker"])
+    _track(d, 80, 92, spec["kicker"], kf, "kicker")
+    lead = spec["lead"]
+    acc = _pastel_accent(t, lead.get("tag"))
+    y = _pastel_headline(d, _lead_heading(spec), 80, 158, W - 160, 96, 46, 3,
+                         t["text"], qa_key="cover_headline_size",
+                         label="cover-headline")
+    y += 32
+    d.rectangle((80, y, 500, y + 14), fill=t["pink"]); y += 58
+    df = font(PR, 32)
+    for ln in _wrap_cap(d, lead["deck"], df, W - 160, 3):
+        d.text((80, y), ln, font=df, fill=t["sub"])
+        _track(d, 80, y, ln, df, "cover-deck")
+        y += 46
+    y += 34
+    lab = "ALSO IN TODAY'S BRIEF" if "Brief" in spec["title"] else "ALSO IN TODAY'S DIGEST"
+    lf = font(PB, 25)
+    d.text((80, y), lab, font=lf, fill=t["kicker"])
+    _track(d, 80, y, lab, lf, "contents-label")
+    y += 48
+    for c in spec["contents"]:
+        nf = font(PB, 30)
+        d.text((80, y), f"{c['n']:02d}", font=nf, fill=acc)
+        _track(d, 80, y, f"{c['n']:02d}", nf, "contents-n")
+        fit_draw(d, 152, y + 1, c["head"], PSB, W - 152 - 80, 29, 22, t["text"],
+                 label="contents-head")
+        fit_draw(d, 152, y + 42, c["tease"], PR, W - 152 - 80, 24, 18, t["sub"],
+                 label="contents-tease")
+        y += 84
+    _pastel_footer(img, t, 1, total)
+    return _finish(img)
+
+
+def _pastel_story(t, spec, sl, entry, idx, total):
+    img = _pastel_bg(t); d = ImageDraw.Draw(img)
+    acc = _pastel_accent(t, sl.get("tag"))
+    kf = font(PB, 25)
+    d.text((80, 88), spec["kicker"], font=kf, fill=t["kicker"])
+    _track(d, 80, 88, spec["kicker"], kf, "kicker")
+    if sl.get("tag"):
+        tf = font(PB, 25)
+        d.text((W - 80, 88), sl["tag"], font=tf, fill=acc, anchor="ra")
+        _track(d, W - 80, 88, sl["tag"], tf, "tag", anchor="ra")
+    y = _heading(d, sl["heading"], PB, 58, W - 160, t["text"], 80, 142,
+                 min_s=34, label="story-headline")
+    y += 44
+    # Measured distribution, template-style: dash bullets, slack spread
+    # evenly between blocks inside the region above the verdict block.
+    # v3 caps bullets at 3 in both spec sources; enforce it here too, and
+    # shrink the bullet type if an over-long set still overflows the region
+    # (degrade the slide, never collide with the verdict block).
+    raw_bullets = list(sl["bullets"])[:3]
+    region_end = 996
+
+    def _blocks(fnt, lh):
+        out = []
+        for b in raw_bullets:
+            lab, body = None, b
+            # Only the makers' known label is lifted into a label line —
+            # arbitrary colon sentences render as written, never re-cased.
+            if ": " in b and b.split(": ", 1)[0].strip().lower() == "why it matters":
+                lab, rest = b.split(": ", 1)
+                body = rest[:1].upper() + rest[1:]
+            out.append((lab, wrap(d, body, fnt, W - 140 - 80), lh))
+        return out
+
+    bsize = 36
+    while True:
+        bf = font(PR, bsize)
+        blh = int(bsize * 1.45)
+        blocks = _blocks(bf, blh)
+        heights = [(40 if lab else 0) + len(lines) * lh for lab, lines, lh in blocks]
+        if sum(heights) <= region_end - y or bsize <= 28:
+            break
+        bsize -= 2
+    extra = region_end - y - sum(heights)
+    gap = min(extra // max(1, len(blocks) - 1), 96) if len(blocks) > 1 and extra > 0 else 34
+    for i, (lab, lines, lh) in enumerate(blocks):
+        if lab:
+            lf = font(PSB, 23)
+            d.text((140, y), lab.upper(), font=lf, fill=acc)
+            _track(d, 140, y, lab.upper(), lf, "bullet-label")
+            y += 40
+        d.rectangle((80, y + 15, 108, y + 22), fill=acc)
+        for ln in lines:
+            d.text((140, y), ln, font=bf, fill=t["sub"])
+            _track(d, 140, y, ln, bf, "bullet")
+            y += lh
+        if i < len(blocks) - 1:
+            y += gap
+    v = (sl or {}).get("verdict")
+    if v:
+        vf = font(PB, 23)
+        d.text((80, 1028), "THE VERDICT", font=vf, fill=acc)
+        _track(d, 80, 1028, "THE VERDICT", vf, "verdict-label")
+        vbf = font(PSB, 29)
+        vy = 1064
+        for ln in _wrap_cap(d, v, vbf, W - 160, 2):
+            d.text((80, vy), ln, font=vbf, fill=t["text"])
+            _track(d, 80, vy, ln, vbf, "verdict")
+            vy += 40
+    _pastel_footer(img, t, idx, total)
+    return _finish(img)
+
+
+def _pastel_recap(t, spec, idx, total):
+    img = _pastel_bg(t); d = ImageDraw.Draw(img)
+    rec = spec["recap"]
+    kf = font(PB, 25)
+    d.text((80, 88), spec["kicker"], font=kf, fill=t["kicker"])
+    _track(d, 80, 88, spec["kicker"], kf, "kicker")
+    hf = font(PB, 54)
+    d.text((80, 134), "Today in one screen", font=hf, fill=t["text"])
+    _track(d, 80, 134, "Today in one screen", hf, "recap-title")
+    sf = font(PR, 27)
+    sub = "All five stories, one verdict each — save this screen."
+    d.text((80, 216), sub, font=sf, fill=t["sub"])
+    _track(d, 80, 216, sub, sf, "recap-sub")
+    slides = spec.get("slides") or []
+    y = 292
+    for i, (head, verdict) in enumerate(rec["rows"]):
+        d.rounded_rectangle((80, y, W - 80, y + 116), radius=24,
+                            fill=(255, 255, 255), outline=t["hair"], width=2)
+        tag = slides[i].get("tag") if i < len(slides) else ""
+        acc = _pastel_accent(t, tag)
+        d.ellipse((112, y + 26, 132, y + 46), fill=acc)
+        fit_draw(d, 156, y + 18, head, PSB, W - 156 - 48, 28, 21, t["text"],
+                 label="recap-head")
+        fit_draw(d, 156, y + 62, verdict, PR, W - 156 - 48, 24, 18, t["sub"],
+                 label="recap-verdict")
+        y += 132
+    d.rounded_rectangle((80, 968, W - 80, 1092), radius=24, fill=t["text"])
+    d = ImageDraw.Draw(img)
+    fit_draw(d, 116, 992, rec["take"], PSB, W - 232, 31, 22, (255, 255, 255),
+             label="take")
+    fit_draw(d, 116, 1040, rec["take_sub"], PR, W - 232, 24, 18, (206, 208, 226),
+             label="take-sub")
+    _pastel_footer(img, t, idx, total)
+    return _finish(img)
+
+
+def _pastel_cta(t, spec, total, npages):
+    img = _pastel_bg(t); d = ImageDraw.Draw(img)
+    kf = font(PB, 28)
+    d.text((80, 96), spec["kicker"], font=kf, fill=t["kicker"])
+    _track(d, 80, 96, spec["kicker"], kf, "kicker")
+    y = 176
+    lines = spec["cta"]
+    for i, ln in enumerate(lines):
+        col = t["pink"] if i == len(lines) - 1 else t["text"]
+        # fit_draw (not fit): an over-long line ellipsizes at the floor
+        # instead of running out of bounds and failing the QA gate.
+        fit_draw(d, 80, y, ln, PBX, W - 160, 56, 24, col, label="cta-line")
+        y += 80
+    # Persona card (template's closing name card, with the photo).
+    card_y = 580
+    d.rounded_rectangle((80, card_y, W - 80, card_y + 190), radius=28,
+                        fill=(255, 255, 255), outline=t["hair"], width=2)
+    ph = circle_photo(140)
+    img.paste(ph, (116, card_y + 25), ph)
+    d = ImageDraw.Draw(img)
+    d.ellipse((111, card_y + 20, 261, card_y + 170), outline=t["ring"], width=4)
+    nf = font(PB, 42)
+    d.text((292, card_y + 38), _PERSONA_NAME, font=nf, fill=t["text"])
+    _track(d, 292, card_y + 38, _PERSONA_NAME, nf, "persona-name")
+    pf = fit(d, _POS_LINE, PR, W - 292 - 48, 27, min_s=20)
+    d.text((292, card_y + 102), _POS_LINE, font=pf, fill=t["sub"])
+    _track(d, 292, card_y + 102, _POS_LINE, pf, "persona-position")
+    _pastel_footer(img, t, npages, total)
+    return _finish(img)
+
+
 _LAYOUTS.update({
     "terminal": (_term_cover2, _term_story, _term_recap, _term_cta2),
     "neon": (_neon_cover2, _neon_story, _neon_recap, _neon_cta2),
     "poster": (_poster_cover2, _poster_story, _poster_recap, _poster_cta2),
     "aurora": (_aurora_cover2, _aurora_story, _aurora_recap, _aurora_cta2),
+    "pastel": (_pastel_cover, _pastel_story, _pastel_recap, _pastel_cta),
 })
 
 

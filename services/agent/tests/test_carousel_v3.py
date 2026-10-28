@@ -98,12 +98,14 @@ def test_render_is_exactly_eight_slides_with_cta_last():
     assert spec["total_pages"] == 8 and spec["cta"][-1].lower().startswith("follow")
 
 
-def test_travel_same_structure_sunset_skin():
+def test_travel_same_structure_pastel_skin():
+    # Was sunset until 2026-10-28, when Venugopal replaced the travel skin
+    # with his attached pastel deck template (see test_pastel_skin.py).
     run_id = "v3-travel-" + uuid.uuid4().hex[:8]
     ctx = _ctx("travel-news", run_id)
     ctx["topic"] = "travel destinations"
     spec = _carousel_spec(ctx)
-    assert spec["skin"] == "sunset"
+    assert spec["skin"] == "pastel"
     assert len(spec["slides"]) == 5 and len(spec["recap"]["rows"]) == 5 and spec["cta"]
     result = render_carousel_for_run(run_id, spec)
     assert result["slide_count"] == 8

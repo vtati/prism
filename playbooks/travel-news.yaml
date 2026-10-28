@@ -10,8 +10,9 @@ playbook:
     end: "#E879A9"
     accent: "#EA580C"
     brand: "Travel Brief · Prism"
-  carousel:  # Same v3 Front Page structure as the Digest; sunset skin family
-    skin: sunset
+  carousel:  # Same v3 structure as the Digest; pastel deck skin (Venugopal's
+    # attached template, 2026-10-28) — travel only; AI News stays poster.
+    skin: pastel
     skin_mode: fixed
     title: "Travel Brief"
     brand_short: "TRAVEL BRIEF"
