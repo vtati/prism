@@ -1050,6 +1050,25 @@ def _aurora_cta2(t, spec, total, npages):
     _lockup2(img, t, npages, total, t["text"], t["ring"], t["sub"], num_font=font(M, 26))
     return _finish(img)
 
+# Poppins' glyph set lacks a few characters travel copy uses (the ʻokina
+# U+02BB in "Faʻa Sāmoa" rendered as a tofu box on the first live staging
+# run, 2026-10-28). Map them to the visually identical apostrophe Poppins
+# does carry — display-only, applied to a copy of the spec at render time.
+_PASTEL_GLYPHS = {"\u02bb": "\u2019", "\u02bc": "\u2019"}
+
+
+def _pastel_normalize(obj):
+    if isinstance(obj, str):
+        for src, dst in _PASTEL_GLYPHS.items():
+            obj = obj.replace(src, dst)
+        return obj
+    if isinstance(obj, list):
+        return [_pastel_normalize(v) for v in obj]
+    if isinstance(obj, dict):
+        return {k: _pastel_normalize(v) for k, v in obj.items()}
+    return obj
+
+
 # ---------------- PASTEL DECK x FRONTPAGE ----------------
 # Venugopal's attached template (2026-10-28): near-white canvas, soft pastel
 # blobs, a gradient top bar, navy Poppins headlines, violet kickers, dash
@@ -1347,6 +1366,8 @@ def render_carousel(spec: dict, output_dir: str) -> dict:
         _POS_LINE = persona["position"]
 
     skin = spec.get("skin") or skin_for_edition(int(spec.get("edition", 1)))
+    if skin == "pastel":
+        spec = _pastel_normalize(spec)
     theme = THEMES.get(skin, THEMES["frontpage"])
     layout = _LAYOUTS[theme["layout"]]
     cover_f, story_f, recap_f, cta_f = layout

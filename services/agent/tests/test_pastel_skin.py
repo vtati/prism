@@ -115,6 +115,18 @@ def test_pastel_render_is_8_slides_and_passes_qa(tmp_path):
     assert (qa["cover_headline_size"] or 0) >= renderer.HEADLINE_FLOOR
 
 
+def test_pastel_glyph_normalization():
+    # Poppins has no U+02BB (ʻokina) — it tofu-boxed on the first live
+    # staging render ("Faʻa Sāmoa"). It must map to the Poppins apostrophe,
+    # recursively, without mutating the caller's spec.
+    src = {"lead": {"deck": "Fa\u02bba Sāmoa and Fa\u02bcana"},
+           "slides": [{"bullets": ["Fa\u02bba"]}]}
+    out = renderer._pastel_normalize(src)
+    assert out["lead"]["deck"] == "Fa\u2019a Sāmoa and Fa\u2019ana"
+    assert out["slides"][0]["bullets"] == ["Fa\u2019a"]
+    assert "\u02bb" in src["lead"]["deck"], "input spec must not be mutated"
+
+
 def test_pastel_edge_case_specs_pass_qa(tmp_path):
     """The shapes render_carousel itself guarantees must degrade gracefully:
     padded stories (no bullets/verdict/tag), fewer contents, builder-capped
