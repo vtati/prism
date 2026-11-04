@@ -363,6 +363,22 @@ def test_bullet_openers_and_domain_vocabulary_are_not_entities():
     assert claims == [] or all(c["support"] == "supported" for c in claims), claims
 
 
+def test_plural_acronyms_and_cta_verbs_match_sources():
+    """Production run 3f9c11ade440 (2026-11-04): claims saying 'LLMs'
+    flagged against sources that say 'LLM' (plural morphology), and
+    the CTA verb 'Dive' minted as an entity."""
+    src = [{"url": SOURCE["url"], "title": "Shipping the LLM safely",
+            "snippet": "Anthropic separates the model's brain from the agent's "
+                       "hands when shipping an LLM to production."}]
+    claims = graph.check_claims(
+        "This approach addresses significant challenges, ensuring safer "
+        "operation of LLMs in deployment.", src)
+    assert claims and claims[0]["support"] == "supported", claims
+    claims = graph.check_claims(
+        "Dive into how Anthropic ships the LLM safely.", src)
+    assert claims == [] or all(c["support"] == "supported" for c in claims), claims
+
+
 def test_review_state_is_json_serializable():
     import json
 
