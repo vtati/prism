@@ -334,7 +334,14 @@ def node_archivist(state: PrismState) -> dict:
     emit(rid, "archivist", "Archivist", "done",
          f"Style pack loaded ({len(style)} chars); dedupe check: {'DUPLICATE — flagged' if duplicate else 'fresh story'}",
          {"duplicate": duplicate})
-    return {"style_pack": style, "duplicate": duplicate, "status": "making"}
+    # The evidence pack the Makers build from leads with the picked
+    # story: Scout's top-5-by-engagement can miss the Curator's winner,
+    # and every artifact is about the pick — its record must be in the
+    # pack they cite (Reviewer v2 checks claims against cited records).
+    ev = state.get("evidence") or []
+    evidence = [picked] + [e for e in ev if e.get("url") != picked.get("url")]
+    return {"style_pack": style, "duplicate": duplicate,
+            "evidence": evidence[:5], "status": "making"}
 
 
 def _maker_ctx(state: PrismState, review_notes: str = "") -> dict:
@@ -362,31 +369,498 @@ def node_makers(state: PrismState) -> dict:
 HYPE_WORDS = ["mind-blowing", "revolutionary!!!", "guaranteed", "!!!"]
 
 
+# ---------- Reviewer v2: claim-support check ----------
+# Aishwarya's Week 3 review (2026-11-04): a cited URL + length check does
+# NOT establish that a claim is true. Reviewer v2 splits each artifact
+# into factual claims (sentences carrying a checkable key fact — a
+# number, a named entity, a month/weekday date) and requires every key
+# fact to appear in the text of the sources the artifact actually cites
+# (Scout already stores title + snippet/page text per record in state;
+# no new fetching layer). The lexical key-fact check is the HARD gate:
+# an unsupported claim produces a specific note and feeds the existing
+# revise loop. Pure opinion / CTA sentences carry no key fact and are
+# exempt, as are headings, source listings, the internal Scores line,
+# production receipts (carousel render lines) and sign-offs — none of
+# those assert a fact about the story.
+_WEEKDAYS = ["monday", "tuesday", "wednesday", "thursday", "friday",
+             "saturday", "sunday"]
+# Prism's own product vocabulary, pronouns and sentence furniture:
+# capitalised in copy all the time, never an external factual entity.
+# Name components are deliberately NOT here — "New" (New York), "First"
+# (First Republic Bank), "LinkedIn"/"Instagram" (claims can be ABOUT
+# them) must survive extraction; edge trimming uses _LEADING_STOP only.
+_ENTITY_STOP = {
+    "prism", "briefing", "brief", "sources", "source", "subject", "hook",
+    "take", "why", "what", "when", "the", "a", "an", "it", "this", "that",
+    "today", "full", "read", "watch", "follow", "carousel", "digest",
+    "slide", "slides", "edition", "playbook", "curator", "scout",
+    "reviewer", "maker", "makers", "research", "scores", "score",
+    "evidence", "story", "stories", "top", "next", "hi", "hello",
+    "reel", "script", "post", "caption", "email", "page",
+    "you", "we", "they", "he", "she", "i", "i'm", "you're", "we're",
+    "let's", "us", "our", "your", "their",
+}
+# Furniture words trimmed from the EDGES of a capitalised run only.
+_LEADING_STOP = {"the", "a", "an", "this", "that", "today", "what",
+                 "why", "when", "hi", "hello"}
+_ENTITY_CONNECTORS = {"of", "the", "and", "&", "for", "de"}
+_MAGNITUDES = {"thousand", "million", "billion", "trillion"}
+_MONTH_CANON = {"jan": "january", "feb": "february", "mar": "march",
+                "apr": "april", "jun": "june", "jul": "july",
+                "aug": "august", "sep": "september", "sept": "september",
+                "oct": "october", "nov": "november", "dec": "december",
+                **{m: m for m in ["january", "february", "march", "april",
+                                   "june", "july", "august", "september",
+                                   "october", "november", "december"]}}
+_NUMBER_WORDS = {"zero": 0, "one": 1, "two": 2, "three": 3, "four": 4,
+                 "five": 5, "six": 6, "seven": 7, "eight": 8, "nine": 9,
+                 "ten": 10, "eleven": 11, "twelve": 12, "thirteen": 13,
+                 "fourteen": 14, "fifteen": 15, "sixteen": 16,
+                 "seventeen": 17, "eighteen": 18, "nineteen": 19,
+                 "twenty": 20, "thirty": 30, "forty": 40, "fifty": 50,
+                 "sixty": 60, "seventy": 70, "eighty": 80, "ninety": 90}
+_NUMBER_SCALES = {"hundred": 100, "thousand": 1_000, "million": 1_000_000,
+                  "billion": 1_000_000_000, "trillion": 1_000_000_000_000}
+
+
+def _num_norm(raw: str) -> str:
+    """Normalise a numeric token so '1,000', '1000' and '1000.0' compare
+    equal; percentages and $ amounts reduce to the bare number."""
+    s = (raw or "").replace(",", "").replace("$", "").replace("%", "").strip()
+    try:
+        v = float(s)
+    except ValueError:
+        return s
+    return str(int(v)) if v == int(v) else str(v)
+
+
+def _extract_numbers(text: str) -> set:
+    return {_num_norm(m) for m in re.findall(r"\$?\d[\d,]*(?:\.\d+)?\s?%?", text or "")}
+
+
+def _match_norm(text: str) -> str:
+    """Lowercase word-normal form for entity matching: punctuation and
+    hyphens become spaces, so 'computer-use' matches 'computer use'."""
+    t = re.sub(r"[-_/]+", " ", (text or "").lower())
+    t = re.sub(r"[^a-z0-9 ]+", " ", t)
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def _cap_kind(tok: str) -> str | None:
+    core = (tok or "").strip("'.-")
+    if len(core) < 2:
+        return None
+    if core.isupper():
+        return "acronym"
+    if any(c.isupper() for c in core[1:]):
+        return "internal"  # OpenAI, GitHub, macOS, iPhone
+    if core[:1].isupper() and core[1:].islower():
+        return "capitalized"
+    if core[:1].isupper():
+        return "capitalized"
+    return None
+
+
+def _stop_form(tok: str) -> str:
+    """Comparison form for stop-word checks: lowercase, punctuation
+    stripped, possessive 's dropped ('Today's' -> 'today')."""
+    s = (tok or "").lower().strip("'.-")
+    return s[:-2] if s.endswith("'s") else s
+
+
+def _extract_entities(sentence: str) -> list:
+    """Named entities: runs of capitalised tokens. A lone capitalised
+    token counts only mid-sentence (sentence-start capitals are grammar,
+    not names) or when it is an acronym / internally capitalised. The
+    returned phrase is built from the RETAINED span (after furniture
+    trimming), so 'New York Times' and 'First Republic Bank' survive
+    whole."""
+    toks = re.findall(r"[A-Za-z][A-Za-z0-9&'.-]*", sentence or "")
+    kinds = [_cap_kind(t) for t in toks]
+    entities, run = [], []
+
+    def _flush(run):
+        words = [(t, k, i) for (t, k, i) in run if k is not None]
+        while words and _stop_form(words[0][0]) in _LEADING_STOP:
+            words.pop(0)
+        while words and _stop_form(words[-1][0]) in _LEADING_STOP:
+            words.pop()
+        if not words:
+            return
+        if all(_stop_form(w[0]) in _ENTITY_STOP for w in words):
+            return
+        if len(words) == 1:
+            tok, kind, idx = words[0]
+            if _stop_form(tok) in _ENTITY_STOP:
+                return
+            if idx == 0 and kind == "capitalized":
+                return  # ordinary sentence-start capital
+            entities.append(tok.strip("'.-"))
+        else:
+            entities.append(" ".join(toks[words[0][2]: words[-1][2] + 1]).strip("'.-"))
+
+    for i, (tok, kind) in enumerate(zip(toks, kinds)):
+        if kind is not None or tok.lower() in _ENTITY_CONNECTORS:
+            run.append((tok, kind, i))
+        else:
+            _flush(run)
+            run = []
+    _flush(run)
+    return entities
+
+
+def _extract_dates(text: str) -> set:
+    """Month (canonicalised: sep/sept -> september) and weekday names.
+    'May' counts only in a date context (May 2026 / 4 May) — as a bare
+    word it is usually the verb."""
+    t = f" {_match_norm(text)} "
+    out = {_MONTH_CANON[d] for d in _MONTH_CANON if f" {d} " in t}
+    if re.search(r"\bmay\s+\d{1,2}\b|\bmay\s+\d{4}\b|\b\d{1,2}\s+may\b", (text or "").lower()):
+        out.add("may")
+    out |= {d for d in _WEEKDAYS if f" {d} " in t}
+    return out
+
+
+def _extract_magnitudes(text: str) -> set:
+    toks = set(_match_norm(text).split())
+    return {m for m in _MAGNITUDES if m in toks}
+
+
+def _extract_number_words(text: str) -> set:
+    """Spelled-out quantities — counted only when a scale word makes
+    them unambiguous facts ('forty million', 'two hundred'), so idioms
+    like 'the one to read' stay exempt. Yields both the full value and,
+    for magnitude scales, the base ('40' for 'forty million', matching
+    how sources write '$40 million')."""
+    toks = _match_norm(text).split()
+    out, i = set(), 0
+    while i < len(toks):
+        if toks[i] in _NUMBER_WORDS or toks[i] in _NUMBER_SCALES:
+            j, current, total, scale_seen, biggest = i, 0, 0, False, 1
+            while j < len(toks) and (toks[j] in _NUMBER_WORDS or toks[j] in _NUMBER_SCALES
+                                     or toks[j] == "and"):
+                w = toks[j]
+                if w in _NUMBER_WORDS:
+                    current += _NUMBER_WORDS[w]
+                elif w == "hundred":
+                    scale_seen = True
+                    current = (current or 1) * 100
+                elif w in _NUMBER_SCALES:
+                    scale_seen = True
+                    biggest = max(biggest, _NUMBER_SCALES[w])
+                    total += (current or 1) * _NUMBER_SCALES[w]
+                    current = 0
+                j += 1
+            value = total + current
+            if scale_seen and value > 0:
+                out.add(_num_norm(str(value)))
+                if biggest >= 1000:
+                    out.add(_num_norm(str(value // biggest)))
+            i = j
+        else:
+            i += 1
+    return out
+
+
+def key_facts(text: str) -> dict:
+    """The checkable facts in a claim: numbers (digits + spelled-out
+    quantities), named entities, dates, and magnitude words — 'million'
+    in '5 million users' is itself a fact the source must contain."""
+    return {"numbers": _extract_numbers(text) | _extract_number_words(text),
+            "entities": _extract_entities(text),
+            "dates": _extract_dates(text),
+            "magnitudes": _extract_magnitudes(text)}
+
+
+def _is_exempt_line(line: str) -> bool:
+    s = line.strip().lstrip("#> ").strip()
+    bare = s.replace("**", "").strip()
+    if not bare:
+        return True
+    if line.lstrip().startswith("#"):
+        return True  # heading
+    if bare.startswith("- [") or bare.startswith("• ["):
+        return True  # citation listing
+    if re.match(r"(?i)^(sources?|scores?)\s*:", bare):
+        return True  # source list header / internal rubric JSON
+    if bare.lower().startswith("why this one"):
+        return True  # the briefing's curator paragraph restates internal
+        # scoring metadata (totals, rubric splits) — curation, not a
+        # claim about the story; the Scores line rule covers the JSON.
+    if bare.startswith("— Prism") or bare.startswith("- Prism,"):
+        return True  # sign-off
+    if re.fullmatch(r"https?://\S+", bare):
+        return True  # bare URL line
+    return False
+
+
+def _clean_line(line: str) -> str:
+    s = re.sub(r"\[([^\]]+)\]\([^)]*\)", r"\1", line)      # md link -> text
+    s = re.sub(r"https?://\S+", " ", s)                    # bare URLs
+    s = re.sub(r"\(\d+\s*[–—-]\s*\d+\s*s\)", " ", s)       # reel timing (0–5s)
+    s = re.sub(r"#\w+", " ", s)                            # hashtags are tags, not claims
+    s = s.replace("**", " ").replace("__", " ").replace("`", " ")
+    s = re.sub(r"^\s*[•\-*]\s+", "", s)
+    return re.sub(r"\s+", " ", s).strip()
+
+
+def _is_receipt(sentence: str) -> bool:
+    """Production receipts describe the render, not the story."""
+    return ("carousel rendered" in sentence.lower()
+            or (sentence.startswith("Format v") and "skin" in sentence))
+
+
+def _lead_token(text: str) -> str:
+    toks = re.findall(r"[A-Za-z][A-Za-z0-9&'.-]*", text or "")
+    return toks[0] if toks else ""
+
+
+def split_claims(content: str, known_tokens: set | None = None) -> list:
+    """Factual claims in an artifact: clauses carrying at least one
+    checkable key fact, after exempt lines/receipts are removed.
+    Sentences are split into clauses on ':' / ';' / ' — ' so maker
+    labels ('Hook:', 'What happened:', 'Subject:') never merge into
+    the claim that follows them. A clause whose first word is a
+    capitalised entity the cited sources themselves name also counts
+    (sentence-start names are otherwise skipped as grammar)."""
+    claims = []
+    for raw in re.split(r"\n+", content or ""):
+        line = raw.strip()
+        if not line or _is_exempt_line(line):
+            continue
+        cleaned = _clean_line(line)
+        if not cleaned:
+            continue
+        for sent in re.split(r"(?<=[.!?])\s+", cleaned):
+            for clause in re.split(r":\s+|;\s+|\s+—\s+", sent):
+                s = clause.strip()
+                if len(s) < 12 or _is_receipt(s):
+                    continue
+                facts = key_facts(s)
+                lead = _lead_token(s)
+                lead_known = (known_tokens and lead
+                              and _cap_kind(lead) is not None
+                              and _stop_form(lead) not in _ENTITY_STOP
+                              and _match_norm(lead) in known_tokens)
+                if facts["numbers"] or facts["entities"] or facts["dates"] \
+                        or facts["magnitudes"] or lead_known:
+                    claims.append(s)
+    return claims
+
+
+def _record_text(rec: dict) -> str:
+    """The support text a source record carries in state: title +
+    snippet/page text + channel, plus its engagement metadata (makers
+    legitimately quote the picked story's points/comments) and its
+    corroboration count."""
+    text = (f"{rec.get('title', '')}. {rec.get('snippet', '')} "
+            f"Source: {rec.get('source', '')}. "
+            f"{rec.get('points', 0)} points, {rec.get('num_comments', 0)} comments.")
+    corr = int(rec.get("corroboration") or 1)
+    if corr >= 2:
+        text += f" Corroborated by {corr} independent sources."
+    return text
+
+
+def check_claims(content: str, sources: list, internal_text: str = "") -> list:
+    """Link each factual claim to supporting source content.
+
+    Returns one dict per claim: {claim, source_url, supporting_sources,
+    support, missing}. support is 'supported' when every key fact
+    (number / named entity / date / magnitude) in the claim appears in
+    the text of the sources the artifact CITES, 'unsupported' with the
+    missing facts listed, or 'no-source' when the artifact cites no
+    source record at all.
+
+    Named entities are checked ONLY against cited source text — never
+    against internal run state. `internal_text` carries verified
+    run-state facts (candidate count, run date) and may support NUMBER
+    and DATE facts only: makers legitimately restate 'from 318
+    candidates', and a fabricated story entity must never pass because
+    an internal string happened to contain it.
+
+    This is a lexical key-fact screen: it verifies that a claim's
+    checkable facts are present in its cited sources. It does not
+    prove entailment (negation or relation swaps remain a known
+    limitation, documented in the README).
+    """
+    src_corpus = "\n".join(_record_text(r) for r in (sources or []))
+    src_norm = _match_norm(src_corpus)
+    src_tokens = set(src_norm.split())
+    full_norm = _match_norm(src_corpus + "\n" + (internal_text or ""))
+    full_numbers = _extract_numbers(src_corpus) | _extract_numbers(internal_text or "") \
+        | _extract_number_words(src_corpus + " " + (internal_text or ""))
+    full_dates = _extract_dates(src_corpus) | _extract_dates(internal_text or "")
+    full_magnitudes = _extract_magnitudes(src_corpus) | _extract_magnitudes(internal_text or "")
+    # Sources write '$40 million' (base + magnitude word); claims may
+    # write '40,000,000' or 'forty million' (full value). Expand corpus
+    # numbers with base x magnitude so both forms can match.
+    for n in list(full_numbers):
+        try:
+            v = float(n)
+        except ValueError:
+            continue
+        for m in full_magnitudes:
+            full_numbers.add(_num_norm(str(v * _NUMBER_SCALES[m])))
+    known_tokens = set()
+    for r in (sources or []):
+        raw = f"{r.get('title', '')} {r.get('snippet', '')}"
+        for tok in re.findall(r"[A-Za-z][A-Za-z0-9&'.-]*", raw):
+            if _cap_kind(tok) is not None and _stop_form(tok) not in _ENTITY_STOP:
+                known_tokens.add(_match_norm(tok))
+    per_source = []
+    for r in (sources or []):
+        rt = _record_text(r)
+        per_source.append((r.get("url"), _match_norm(rt),
+                           _extract_numbers(rt) | _extract_number_words(rt),
+                           _extract_dates(rt), _extract_magnitudes(rt)))
+
+    def _missing_from(facts, norm, tokens, numbers, dates, magnitudes, entities=True):
+        miss = []
+        for n in sorted(facts["numbers"]):
+            if n not in numbers:
+                miss.append(n)
+        if entities:
+            for e in facts["entities"]:
+                en = _match_norm(e)
+                if en and f" {en} " not in f" {norm} " and not all(t in tokens for t in en.split()):
+                    miss.append(en)
+        for d in sorted(facts["dates"]):
+            if d not in dates:
+                miss.append(d)
+        for m in sorted(facts["magnitudes"]):
+            if m in magnitudes:
+                continue
+            # '40,000,000 users' in the source supports the claim's
+            # 'million' even though the word itself never appears.
+            scale = _NUMBER_SCALES[m]
+            implied = False
+            for n in facts["numbers"]:
+                if n not in numbers:
+                    continue
+                try:
+                    v = float(n)
+                except ValueError:
+                    continue
+                if v >= scale and v % scale == 0:
+                    implied = True
+                    break
+            if not implied:
+                miss.append(m)
+        return miss
+
+    def _fact_total(facts):
+        return (len(facts["numbers"]) + len(facts["entities"])
+                + len(facts["dates"]) + len(facts["magnitudes"]))
+
+    out = []
+    for claim in split_claims(content, known_tokens):
+        facts = key_facts(claim)
+        lead = _lead_token(claim)
+        if (lead and _cap_kind(lead) is not None
+                and _stop_form(lead) not in _ENTITY_STOP
+                and _match_norm(lead) in known_tokens
+                and lead not in facts["entities"]):
+            facts["entities"] = facts["entities"] + [lead]
+        if not sources:
+            miss = (sorted(facts["numbers"]) + [_match_norm(e) for e in facts["entities"]]
+                    + sorted(facts["dates"]) + sorted(facts["magnitudes"]))
+            out.append({"claim": claim, "source_url": None, "supporting_sources": [],
+                        "support": "no-source", "missing": miss})
+            continue
+        miss = _missing_from(facts, src_norm, src_tokens, full_numbers, full_dates,
+                             full_magnitudes)
+        # Entities alone decide against source text; numbers/dates/
+        # magnitudes may also come from internal run facts (above).
+        total = _fact_total(facts)
+        best_url, best_score, supporting = None, -1, []
+        for url, snorm, snums, sdates, smags in per_source:
+            stoks = set(snorm.split())
+            smiss = _missing_from(facts, snorm, stoks, snums, sdates, smags)
+            score = total - len(smiss)
+            if score > best_score:
+                best_url, best_score = url, score
+            if not smiss:
+                supporting.append(url)
+        if best_score <= 0:
+            best_url = sources[0].get("url")  # the citation the claim rides on
+        out.append({"claim": claim, "source_url": best_url,
+                    "supporting_sources": supporting,
+                    "support": "supported" if not miss else "unsupported",
+                    "missing": miss})
+    return out
+
+
 def node_reviewer(state: PrismState) -> dict:
     rid = state["run_id"]
     prev = state.get("review") or {}
     rounds = int(prev.get("rounds", 0)) + 1
-    evidence_urls = {e["url"] for e in state["evidence"] if e.get("url")}
+    # Source records the run actually holds, keyed by Scout's normalized
+    # URL: evidence pack, candidates, and the picked story. A citation
+    # only counts when it resolves to one of these records — its TEXT
+    # is what claims are checked against, never the URL string alone.
+    from .scout import _norm_url
+
+    pool: dict[str, dict] = {}
+    for rec in list(state.get("evidence") or []) + list(state.get("candidates") or []):
+        if rec.get("url"):
+            pool[_norm_url(rec["url"])] = rec
+    picked = state.get("picked") or {}
+    if picked.get("url"):
+        pool[_norm_url(picked["url"])] = picked
+    from datetime import datetime, timezone
+    now = datetime.now(timezone.utc)
+    # Verified run-state facts makers may restate as NUMBERS/DATES only
+    # (see check_claims): how many candidates the sweep pooled, and the
+    # run's own date. Never free text, never the user-supplied topic,
+    # never the curator's explanation — those must not support claims.
+    internal_text = (f"{len(state.get('candidates') or [])} candidates. "
+                     f"Run date: {now.strftime('%B %Y %A %d')}.")
     notes, per_artifact = [], {}
+    total_claims, supported_claims = 0, 0
     for name, art in (state.get("artifacts") or {}).items():
         content = art.get("content") or ""
-        cited = [u for u in evidence_urls if u in content] + list(art.get("citations") or [])
-        grounded = bool(cited)
-        ok = grounded and len(content) >= 80
-        per_artifact[name] = {"grounded": grounded, "ok": ok}
+        # The carousel's factual text lives in review_text (its content
+        # is a render receipt); other artifacts are checked on content.
+        check_text = content
+        if art.get("review_text"):
+            check_text = content + "\n\n" + art["review_text"]
+        raw_cited = [u.rstrip(".,;:") for u in re.findall(r"https?://[^\s)\]]+", check_text)]
+        cited_urls = list(dict.fromkeys(raw_cited + list(art.get("citations") or [])))
+        sources = [pool[_norm_url(u)] for u in cited_urls if _norm_url(u) in pool]
+        grounded = bool(sources)
+        claims = check_claims(check_text, sources, internal_text=internal_text)
+        unsupported = [c for c in claims if c["support"] != "supported"]
+        total_claims += len(claims)
+        supported_claims += len(claims) - len(unsupported)
+        ok = grounded and len(content) >= 80 and not unsupported
+        per_artifact[name] = {"grounded": grounded, "ok": ok,
+                              "claims_total": len(claims),
+                              "claims_supported": len(claims) - len(unsupported),
+                              "unsupported_claims": unsupported}
         if not grounded:
             notes.append(f"{name}: no evidence URL cited — add sources.")
         if len(content) < 80:
             notes.append(f"{name}: too thin ({len(content)} chars).")
+        for c in unsupported[:3]:
+            where = c["source_url"] or "any cited source"
+            miss = f" (missing: {', '.join(c['missing'][:4])})" if c["missing"] else ""
+            notes.append(f"{name}: claim '{c['claim'][:110]}' not supported by {where}{miss}")
+        if len(unsupported) > 3:
+            notes.append(f"{name}: +{len(unsupported) - 3} more unsupported claims.")
         if any(h in content for h in HYPE_WORDS):
             notes.append(f"{name}: hype language violates tone rule.")
     if state.get("duplicate"):
         notes.append("Picked story was covered in a past run (dedupe rule).")
     verdict = "pass" if not notes else "revise"
     emit(rid, "reviewer", "Reviewer", "done",
-         f"Reviewer verdict: {verdict.upper()} (round {rounds})" + (f" — {'; '.join(notes)}" if notes else " — all rules grounded"),
+         f"Reviewer verdict: {verdict.upper()} (round {rounds})"
+         + (f" — {'; '.join(notes)}" if notes
+            else f" — every extracted factual claim supported by its cited source ({supported_claims}/{total_claims} claims)"),
          {"verdict": verdict, "notes": notes, "per_artifact": per_artifact})
-    return {"review": {"verdict": verdict, "notes": notes, "rounds": rounds, "per_artifact": per_artifact},
+    return {"review": {"verdict": verdict, "notes": notes, "rounds": rounds,
+                       "per_artifact": per_artifact,
+                       "claims": {"total": total_claims, "supported": supported_claims}},
             "review_notes": "; ".join(notes), "status": "awaiting_approval" if verdict == "pass" or rounds >= 2 else "making"}
 
 
@@ -419,8 +893,13 @@ def node_ship(state: PrismState) -> dict:
     run_dir.mkdir(parents=True, exist_ok=True)
     approved = (state.get("approval") or {}).get("decision") == "approve"
     artifacts = state.get("artifacts") or {}
-    # Crosscast stub: records the exact payload the post-demo adapter will send
+    # Publisher stub: records the exact payload the post-demo adapter will
+    # send. kind=publisher_stub — it is NOT a published output and must
+    # never be presented as one (Aishwarya's Week 3 note, 2026-11-04).
     crosscast_payload = {
+        "kind": "publisher_stub",
+        "label": "Publisher stub — Crosscast payload recorded, NOT sent",
+        "sent": False,
         "adapter": "crosscast-stub",
         "status": "recorded_not_sent",
         "playbook_id": pb["id"],
@@ -429,37 +908,56 @@ def node_ship(state: PrismState) -> dict:
         "picked": state["picked"],
     }
     (run_dir / "crosscast_payload.json").write_text(json.dumps(crosscast_payload, indent=2))
-    # Run Page export
+    # Local export (kind=local_export): the Run Page is a file on disk /
+    # a page on this deployment — the ONLY output that exists after a run.
+    # It is distinct from the publisher stub above, which sends nothing.
     art_html = "".join(
         f"<section><h2>{v.get('title', k)}</h2><pre>{_esc(v.get('content', ''))}</pre></section>"
         for k, v in artifacts.items())
     html = (f"<!doctype html><html><head><meta charset='utf-8'><title>Prism Run {rid}</title>"
             "<style>body{font-family:system-ui;background:#F7F9FA;color:#0B1526;max-width:860px;margin:40px auto;padding:0 20px}"
             "pre{white-space:pre-wrap;background:#fff;border-radius:18px;padding:20px}h1{background:linear-gradient(90deg,#38BDF8,#7C6CF0);"
-            "-webkit-background-clip:text;color:transparent}</style></head><body>"
+            "-webkit-background-clip:text;color:transparent}.kind{display:inline-block;border:1px solid #7C6CF0;border-radius:999px;"
+            "padding:2px 10px;font-size:12px;font-weight:700;color:#7C6CF0}</style></head><body>"
             f"<h1>{_esc(state['picked'].get('title', ''))}</h1>"
+            f"<p><span class='kind'>kind: local_export</span></p>"
             f"<p>Playbook: {pb['name']} · Reviewer: {(state.get('review') or {}).get('verdict')} · "
-            f"Approved: {approved} · LLM mode: {get_llm().mode}</p>{art_html}</body></html>")
+            f"Approved: {approved} · LLM mode: {get_llm().mode}</p>"
+            f"<p>Local export — this Run Page is an exported file, not a channel publish. "
+            f"The Crosscast publisher is a stub (kind: publisher_stub): its payload was "
+            f"recorded, not sent.</p>{art_html}</body></html>")
     page_path = run_dir / "index.html"
     page_path.write_text(html)
+    public_base = os.environ.get("PUBLIC_WEB_BASE", "https://prism.genalphalabs.com").rstrip("/")
+    run_page_url = f"{public_base}/runs/{pb['id']}-latest"
+    outputs = [
+        {"kind": "local_export",
+         "label": "Local export — Run Page (exported file, not a channel publish)",
+         "path": str(page_path), "bundle": str(run_dir / "bundle.json"),
+         "url": run_page_url},
+        {"kind": "publisher_stub",
+         "label": "Publisher stub — Crosscast payload recorded, NOT sent",
+         "path": str(run_dir / "crosscast_payload.json"), "sent": False},
+    ]
     bundle = {"run_id": rid, "playbook_id": pb["id"], "picked": state["picked"],
               "scores": state["scores"], "score_explanation": state["score_explanation"],
               "review": state.get("review"), "approval": state.get("approval"),
               "artifacts": {k: {kk: vv for kk, vv in v.items() if kk != "content"} | {"content": v.get("content", "")}
                             for k, v in artifacts.items()},
-              "run_page": str(page_path), "crosscast_payload": str(run_dir / "crosscast_payload.json")}
+              "run_page": str(page_path), "crosscast_payload": str(run_dir / "crosscast_payload.json"),
+              "outputs": outputs}
     (run_dir / "bundle.json").write_text(json.dumps(bundle, indent=2))
     if approved:
         record_past_run({"run_id": rid, "playbook_id": pb["id"],
                          "title": state["picked"].get("title"), "url": state["picked"].get("url")})
-    public_base = os.environ.get("PUBLIC_WEB_BASE", "https://prism.genalphalabs.com").rstrip("/")
-    run_page_url = f"{public_base}/runs/{pb['id']}-latest"
     ship = {"status": "shipped" if approved else "exported_not_approved",
             "run_page": str(page_path), "bundle": str(run_dir / "bundle.json"),
             "crosscast_payload": str(run_dir / "crosscast_payload.json"),
-            "run_page_url": run_page_url}
+            "run_page_url": run_page_url,
+            "outputs": outputs}
     emit(rid, "ship", "Ship", "done",
-         f"Run Page exported: {page_path} · Crosscast payload recorded (stub, not sent)",
+         f"Local export ready: {page_path} (kind: local_export) · "
+         f"Crosscast payload recorded (kind: publisher_stub, not sent)",
          {"ship": ship, "run_page_url": run_page_url})
     return {"ship": ship, "status": ship["status"]}
 

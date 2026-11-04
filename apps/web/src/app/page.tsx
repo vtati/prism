@@ -309,7 +309,7 @@ export default function Page() {
       {/* ================= graph ================= */}
       <section className="panel" style={{ marginTop: 18 }}>
         <h2>🗺️ The Floor — live agent graph</h2>
-        <p className="sub">Watch work flow: research → score → remember → <b>fan-out to three makers at once</b> → fact-check → your approval.</p>
+        <p className="sub">Watch work flow: research → score → remember → <b>fan-out to three makers at once</b> → claim-check → your approval.</p>
         <div className="graphWrap"><GraphCanvas nodeStates={nodeStates} activeEdges={edges} /></div>
       </section>
 

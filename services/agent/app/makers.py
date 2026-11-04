@@ -425,18 +425,43 @@ def render_carousel_for_run(run_id: str, spec: dict) -> dict:
     return result
 
 
+def _carousel_review_text(spec: dict) -> str:
+    """The carousel's factual text as one canonical string for Reviewer
+    v2: lead heading + deck, contents, every slide's heading / bullets /
+    verdict, and the recap rows + take. The render receipt in `content`
+    asserts nothing about the story, so without this the carousel's
+    actual claims would bypass the claim-support gate entirely.
+    Branding lines (kicker, CTA, persona) are not story claims and are
+    left out."""
+    lines = [spec["lead"]["heading"], spec["lead"].get("display_headline", ""),
+             spec["lead"]["deck"]]
+    for c in spec["contents"]:
+        lines += [c["head"], c["tease"]]
+    for s in spec["slides"]:
+        lines += [s["heading"], *(s.get("bullets") or []), s.get("verdict", "")]
+    for row in spec["recap"]["rows"]:
+        lines += list(row)
+    lines.append(spec["recap"]["take"])
+    return "\n".join(x for x in lines if x)
+
+
 def make_carousel(ctx) -> dict:
     spec = _carousel_spec(ctx)
     result = render_carousel_for_run(ctx["run_id"], spec)
+    citations = []
+    for c in [ctx["picked"]] + list(ctx["candidates"][:5]):
+        if c.get("url") and c["url"] not in citations:
+            citations.append(c["url"])
     return {"type": "linkedin_carousel", "title": "LinkedIn carousel",
             "content": f"Carousel rendered ({result['slide_count']} slides, via {result['via']}). "
                        f"Format v3 Front Page · edition #{spec['edition']} · skin {spec['skin']}. "
                        f"Cover lead: {spec['lead']['heading']}",
+            "review_text": _carousel_review_text(spec),
             "pdf_path": result["pdf_path"], "png_paths": result["png_paths"],
             "qa": result.get("qa"),
             "slide_count": result["slide_count"], "rendered_via": result["via"],
             "skin": spec["skin"], "edition": spec["edition"], "spec": spec,
-            "citations": [c["url"] for c in ctx["candidates"][:5] if c.get("url")]}
+            "citations": citations}
 
 
 def make_linkedin_post(ctx) -> dict:

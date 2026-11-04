@@ -15,9 +15,16 @@ function checkFor(gate: GateData, name: string): PerArtifactCheck | undefined {
 
 function CheckBadges({ check, verdictNote }: { check?: PerArtifactCheck; verdictNote?: string }) {
   if (check) {
+    const claims = typeof check.claims_total === "number"
+      ? ` (${check.claims_supported ?? 0}/${check.claims_total} claims)`
+      : "";
     return (
       <span className="gateChecks">
-        <span className={check.grounded ? "ok" : "bad"}>{check.grounded ? "✓ grounded" : "⚠ not grounded"}</span>
+        {!check.grounded
+          ? <span className="bad">⚠ no source cited</span>
+          : check.ok
+            ? <span className="ok">✓ claims supported{claims}</span>
+            : <span className="bad">⚠ unsupported claims{claims}</span>}
         <span className={check.ok ? "ok" : "bad"}>{check.ok ? "✓ passed" : "⚠ flagged"}</span>
       </span>
     );
@@ -62,18 +69,19 @@ function ReviewPanel({ gate, live, runId, apiBase }: {
       {review && (
         <div className="veraReview">
           {notes.length > 0 ? (
-            <ul>{notes.map((n, i) => <li key={i}>✓ {n}</li>)}</ul>
+            <ul>{notes.map((n, i) => <li key={i}>{verdict === "PASS" ? "✓" : "⚠"} {n}</li>)}</ul>
           ) : (
-            <p className="veraOk">✓ All checks passed — every artifact grounded in Scout&apos;s evidence.</p>
+            <p className="veraOk">✓ All checks passed — every extracted factual claim (numbers, named entities, dates) is supported by the text of a source it cites.</p>
           )}
           {review.perArtifact && (
             <div className="perArtifact">
               {gate.artifacts.map(a => {
                 const c = checkFor(gate, a.name);
                 if (!c) return null;
+                const claims = typeof c.claims_total === "number" ? ` · ${c.claims_supported ?? 0}/${c.claims_total} claims supported` : "";
                 return (
                   <span key={a.name} className="perArt">
-                    {a.icon} {a.label}: {c.grounded ? "✓ grounded" : "⚠ not grounded"} · {c.ok ? "✓ ok" : "⚠ flagged"}
+                    {a.icon} {a.label}: {c.grounded ? "✓ source-cited" : "⚠ no source cited"}{claims} · {c.ok ? "✓ ok" : "⚠ flagged"}
                   </span>
                 );
               })}
@@ -162,10 +170,14 @@ export default function ShipRoom({ phase, review, runPageTitle, playbookName, to
       {phase === "running" && <p>The team is mid-run… Vera gets the final word before anything reaches you. Reads are autonomous; writes always wait. 🙋</p>}
       {phase === "awaiting" && (
         <>
-          <p><b>The suite is complete and Reviewer-approved.</b> {review ? (review.notes.length ? `${review.notes.length} checks passed, including: ${review.notes[0].toLowerCase()}.` : "All grounding and tone checks passed.") : ""} Read it all below — reviewing publishes nothing. Approve to publish the Run Page, or send it back with notes.</p>
+          {(review?.verdict ?? gate?.review?.verdict ?? "").toUpperCase() === "REVISE" ? (
+            <p><b>The suite is complete, but Reviewer issues remain.</b> Vera flagged the notes below after the final revision round — the call is now yours. Read it all before deciding: approve to export anyway (a local export), or send it back with notes.</p>
+          ) : (
+            <p><b>The suite is complete and Reviewer-approved.</b> {review ? (review.notes.length ? `${review.notes.length} checks passed, including: ${review.notes[0].toLowerCase()}.` : "All claim-support and tone checks passed.") : ""} Read it all below — reviewing publishes nothing. Approve to export the Run Page (a local export), or send it back with notes.</p>
+          )}
           {showPanel && <ReviewPanel gate={gate!} live={!!live} runId={runId ?? null} apiBase={apiBase ?? ""} />}
           <div className="row">
-            <button className="btn" onClick={onApprove}>✅ Approve &amp; Publish</button>
+            <button className="btn" onClick={onApprove}>✅ Approve &amp; Export</button>
             <button className="btn ghost2" onClick={onChanges}>✏️ Request changes</button>
           </div>
         </>
@@ -178,12 +190,19 @@ export default function ShipRoom({ phase, review, runPageTitle, playbookName, to
       )}
       {phase === "approved" && (
         <>
-          <p><b>Published!</b> The suite is live as a public Run Page. Post-demo, this same approval fires the Crosscast adapter and ships to every channel at once.</p>
+          <p><b>Exported locally.</b> The suite is exported as a Run Page — a <b>local export</b>, not a channel publish. The Crosscast publisher is a <b>stub</b>: its payload was recorded, not sent. Post-demo, this same approval fires the real Crosscast adapter and ships to every channel at once.</p>
+          {gate?.shipOutputs && gate.shipOutputs.length > 0 && (
+            <div className="checks">
+              {gate.shipOutputs.map((o, i) => (
+                <span key={i}>🏷️ kind: {o.kind} — {o.label}</span>
+              ))}
+            </div>
+          )}
           {review && <div className="checks">{review.notes.map((n, i) => <span key={i}>✓ {n}</span>)}</div>}
           <div className="runpage">
             <a className="u" href={displayRunPageUrl} target="_blank" rel="noreferrer">{displayRunPageUrl}</a>
             <div style={{ fontWeight: 900, fontSize: 16, marginTop: 3 }}>{runPageTitle}</div>
-            <div style={{ fontSize: 13, color: "var(--muted)", fontWeight: 700 }}>Topic: “{topic}” · Researched, written, designed &amp; fact-checked by Nova&apos;s team · Human-approved 🙋</div>
+            <div style={{ fontSize: 13, color: "var(--muted)", fontWeight: 700 }}>Topic: “{topic}” · Researched, written, designed &amp; claim-checked against cited sources by Nova&apos;s team · Human-approved 🙋</div>
           </div>
           {showPanel && <ReviewPanel gate={gate!} live={!!live} runId={runId ?? null} apiBase={apiBase ?? ""} />}
           <div className="row"><button className="btn" onClick={onReset}>🎬 Run another one</button></div>

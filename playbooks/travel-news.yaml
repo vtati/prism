@@ -67,7 +67,7 @@ playbook:
     - past-runs/
   makers: [briefing, linkedin_carousel, linkedin_post, email]
   review_rules:
-    - every_claim_grounded_in_sources
+    - every_claim_supported_by_cited_source_text
     - no_story_covered_before
     - self_contained_for_a_new_viewer
     - tone_matches_playbook

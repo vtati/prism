@@ -7,7 +7,7 @@ const body = Nunito({ subsets: ["latin"], variable: "--font-body", weight: ["400
 
 export const metadata: Metadata = {
   title: "Prism — Agentic GTM Studio",
-  description: "One topic in. A whole spectrum of publish-ready content out — researched, written, designed and fact-checked by a team of AI agents, live.",
+  description: "One topic in. A whole spectrum of publish-ready content out — researched, written, designed and claim-checked against cited sources by a team of AI agents, live.",
 };
 
 export default function RootLayout({ children }: { children: React.ReactNode }) {
