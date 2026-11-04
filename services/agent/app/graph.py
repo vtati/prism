@@ -399,10 +399,17 @@ _ENTITY_STOP = {
     "reel", "script", "post", "caption", "email", "page",
     "you", "we", "they", "he", "she", "i", "i'm", "you're", "we're",
     "let's", "us", "our", "your", "their",
+    # Imperative verbs that open CTA/implication sentences in copy
+    # ('Discover the engineering feat…') — verbs, not names.
+    "discover", "explore", "learn", "check", "join", "save", "book",
+    "see", "try", "get", "start",
 }
-# Furniture words trimmed from the EDGES of a capitalised run only.
+# Furniture words trimmed from the EDGES of a capitalised run only:
+# articles/starters plus bullet-opener words ('Potential for AI to…'
+# must not mint the entity 'Potential for AI').
 _LEADING_STOP = {"the", "a", "an", "this", "that", "today", "what",
-                 "why", "when", "hi", "hello"}
+                 "why", "when", "hi", "hello", "potential", "introducing",
+                 "announcing", "presenting", "revealing", "meet"}
 _ENTITY_CONNECTORS = {"of", "the", "and", "&", "for", "de"}
 _MAGNITUDES = {"thousand", "million", "billion", "trillion"}
 _MONTH_CANON = {"jan": "january", "feb": "february", "mar": "march",
@@ -676,7 +683,8 @@ def _record_text(rec: dict) -> str:
     return text
 
 
-def check_claims(content: str, sources: list, internal_text: str = "") -> list:
+def check_claims(content: str, sources: list, internal_text: str = "",
+                 entity_extra_text: str = "") -> list:
     """Link each factual claim to supporting source content.
 
     Returns one dict per claim: {claim, source_url, supporting_sources,
@@ -701,6 +709,12 @@ def check_claims(content: str, sources: list, internal_text: str = "") -> list:
     src_corpus = "\n".join(_record_text(r) for r in (sources or []))
     src_norm = _match_norm(src_corpus)
     src_tokens = set(src_norm.split())
+    # Entity support corpus: cited source text plus the playbook's
+    # domain label (entity_extra_text) — the beat's own vocabulary
+    # ('AI' for the AI playbook) is definitional, not a factual entity
+    # a claim must source. Numbers/dates never use this corpus.
+    ent_norm = _match_norm(src_corpus + "\n" + (entity_extra_text or ""))
+    ent_tokens = set(ent_norm.split())
     full_norm = _match_norm(src_corpus + "\n" + (internal_text or ""))
     full_numbers = _extract_numbers(src_corpus) | _extract_numbers(internal_text or "") \
         | _extract_number_words(src_corpus + " " + (internal_text or ""))
@@ -782,7 +796,7 @@ def check_claims(content: str, sources: list, internal_text: str = "") -> list:
             out.append({"claim": claim, "source_url": None, "supporting_sources": [],
                         "support": "no-source", "missing": miss})
             continue
-        miss = _missing_from(facts, src_norm, src_tokens, full_numbers, full_dates,
+        miss = _missing_from(facts, ent_norm, ent_tokens, full_numbers, full_dates,
                              full_magnitudes)
         # Entities alone decide against source text; numbers/dates/
         # magnitudes may also come from internal run facts (above).
@@ -843,7 +857,8 @@ def node_reviewer(state: PrismState) -> dict:
         cited_urls = list(dict.fromkeys(raw_cited + list(art.get("citations") or [])))
         sources = [pool[_norm_url(u)] for u in cited_urls if _norm_url(u) in pool]
         grounded = bool(sources)
-        claims = check_claims(check_text, sources, internal_text=internal_text)
+        claims = check_claims(check_text, sources, internal_text=internal_text,
+                              entity_extra_text=_DOMAIN_LABELS.get(state.get("playbook_id", ""), ""))
         unsupported = [c for c in claims if c["support"] != "supported"]
         total_claims += len(claims)
         supported_claims += len(claims) - len(unsupported)

@@ -341,6 +341,28 @@ def test_clause_start_gerund_does_not_mint_an_entity():
     assert claims and claims[0]["support"] == "supported", claims
 
 
+def test_bullet_openers_and_domain_vocabulary_are_not_entities():
+    """Live staging run bdaa73afb76b (2026-11-04): a carousel bullet
+    opener minted 'Potential for AI', CTA imperatives minted 'Discover',
+    and the playbook's own domain word 'AI' flagged against a source
+    whose text says 'LLM' instead. All three are vocabulary, not
+    checkable entities."""
+    src = [{"url": SOURCE["url"], "title": "How Anthropic ships the LLM safely",
+            "snippet": "Anthropic separates the brain from the hands in its "
+                       "engineering approach to deployment."}]
+    claims = graph.check_claims(
+        "Potential for AI to impact reputations without human oversight.",
+        src, entity_extra_text="AI")
+    assert claims and claims[0]["support"] == "supported", claims
+    claims = graph.check_claims(
+        "Anthropic's innovative approach to AI deployment is turning heads.",
+        src, entity_extra_text="AI")
+    assert claims and claims[0]["support"] == "supported", claims
+    claims = graph.check_claims(
+        "Discover the engineering approach behind the launch.", src)
+    assert claims == [] or all(c["support"] == "supported" for c in claims), claims
+
+
 def test_review_state_is_json_serializable():
     import json
 
