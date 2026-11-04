@@ -190,9 +190,9 @@ export function translateApiEvent(ev: ApiEvent, ctx: TranslateCtx): DemoEvent[] 
       if (!notes.length && d.per_artifact && typeof d.per_artifact === "object") {
         const entries = Object.values(d.per_artifact) as { grounded?: boolean; ok?: boolean }[];
         const grounded = entries.filter(v => v && v.grounded && v.ok).length;
-        if (entries.length) notes = [`${grounded}/${entries.length} artifacts grounded in Scout's evidence`, "Tone matches the Playbook voice"];
+        if (entries.length) notes = [`${grounded}/${entries.length} artifacts with every claim supported by cited sources`, "Tone matches the Playbook voice"];
       }
-      if (!notes.length) notes = ["All claims grounded in Scout's evidence"];
+      if (!notes.length) notes = ["All factual claims supported by cited sources"];
       const perArtifact = d.per_artifact && typeof d.per_artifact === "object" ? d.per_artifact : undefined;
       return [
         S("reviewer", "working", "Monocle on. Nobody ships past me unverified."),

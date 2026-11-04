@@ -5,8 +5,9 @@ system (LangGraph + LangChain + MCP tool-calling) that turns a topic, a
 product, or the day's news into a ready-to-publish go-to-market suite:
 research briefing, 90-second reel script, LinkedIn carousel (PDF),
 LinkedIn post, Instagram caption, and email — researched, scored,
-fact-checked by a reviewer agent, and approved by a human before
-anything ships.
+claim-checked by a reviewer agent (every extracted factual claim —
+numbers, named entities, dates — must be supported by the text of a
+source it cites), and approved by a human before anything ships.
 
 The agents never change. Everything domain-specific lives in a
 **Playbook** (YAML in `playbooks/`): sources, scoring rubric, brand
@@ -23,7 +24,7 @@ Built for The Gen Academy · Mastering Agentic AI · Week 3
 
 ```
 topic → Supervisor → Scout → Curator → Archivist → Makers (parallel)
-      → Reviewer (grounding loop, max 2) → Human Gate (interrupt) → Ship
+      → Reviewer (claim-support loop, max 2) → Human Gate (interrupt) → Ship
 ```
 
 - **Scout** — MCP/key-free research: Hacker News (Algolia) + fetch;
@@ -37,11 +38,24 @@ topic → Supervisor → Scout → Curator → Archivist → Makers (parallel)
   maker calls the custom **FastMCP carousel server**
   (`mcp_servers/carousel/`, PIL, 1080×1350, aurora gradients) via
   langchain-mcp-adapters, with an in-process renderer fallback.
-- **Reviewer** — separate agent; every artifact must cite Scout
-  evidence or it loops back for revision (max 2 rounds).
+- **Reviewer (v2, claim-support gate)** — separate agent; splits every
+  artifact into factual claims and requires each claim's numbers, named
+  entities and dates to appear in the text of the sources it cites
+  (Scout's stored snippets/page text — no new fetching). A claim its
+  cited page doesn't support produces a specific note and loops back
+  for revision (max 2 rounds). A planted-claim test
+  (`tests/test_reviewer_claims.py`) proves a fabricated claim with the
+  correct URL cited now revises instead of passing. Honest limit: this
+  is a lexical key-fact screen — it verifies that a claim's checkable
+  facts are present in its cited sources, not full entailment
+  (negation or relation swaps are not caught); the carousel is checked
+  on its full spec text, not just its render receipt.
 - **Human Gate** — LangGraph interrupt. Reads are autonomous; writes
-  need a human. **Ship** — Run Page export + a Crosscast stub that
-  records the exact payload the post-demo publishing adapter will send.
+  need a human. **Ship** — two distinct output kinds: the Run Page is a
+  `local_export`; the Crosscast payload is a `publisher_stub` that
+  records the exact payload the post-demo publishing adapter will
+  send. The stub is recorded, never sent, and never presented as a
+  published output.
 
 State is checkpointed in SQLite (LangGraph checkpointer).
 

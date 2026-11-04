@@ -12,7 +12,16 @@
 // the UI falls back gracefully.
 import type { RunFixture } from "./fixtures";
 
-export interface PerArtifactCheck { grounded?: boolean; ok?: boolean }
+export interface PerArtifactCheck {
+  grounded?: boolean;
+  ok?: boolean;
+  /** Reviewer v2 claim-support detail (live runs). */
+  claims_total?: number;
+  claims_supported?: number;
+  unsupported_claims?: { claim: string; source_url?: string | null; support: string; missing?: string[] }[];
+}
+
+export interface ShipOutput { kind: string; label: string; url?: string; sent?: boolean }
 
 export interface GateReviewView {
   verdict: string;
@@ -35,6 +44,9 @@ export interface GateData {
   review: GateReviewView | null;
   shipRunPageUrl?: string;
   shipStatus?: string;
+  /** Ship outputs with their artifact kinds: local_export vs
+   *  publisher_stub — the stub is recorded, never sent. */
+  shipOutputs?: ShipOutput[];
 }
 
 const ICONS: Record<string, string> = {
@@ -112,6 +124,16 @@ export function gateDataFromRunState(raw: unknown, fb: GateFallbacks = {}): Gate
   }
 
   const shipRaw = rec(state.ship);
+  const shipOutputs: ShipOutput[] | undefined = Array.isArray(shipRaw.outputs)
+    ? (shipRaw.outputs as AnyRec[])
+        .filter(o => typeof o.kind === "string")
+        .map(o => ({
+          kind: String(o.kind),
+          label: typeof o.label === "string" ? o.label : String(o.kind),
+          url: typeof o.url === "string" ? o.url : undefined,
+          sent: typeof o.sent === "boolean" ? o.sent : undefined,
+        }))
+    : undefined;
   return {
     artifacts,
     review,
@@ -120,6 +142,7 @@ export function gateDataFromRunState(raw: unknown, fb: GateFallbacks = {}): Gate
         ? shipRaw.run_page_url
         : undefined,
     shipStatus: typeof shipRaw.status === "string" ? shipRaw.status : undefined,
+    shipOutputs,
   };
 }
 
