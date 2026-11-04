@@ -402,7 +402,7 @@ _ENTITY_STOP = {
     # Imperative verbs that open CTA/implication sentences in copy
     # ('Discover the engineering feat…') — verbs, not names.
     "discover", "explore", "learn", "check", "join", "save", "book",
-    "see", "try", "get", "start",
+    "see", "try", "get", "start", "dive",
 }
 # Furniture words trimmed from the EDGES of a capitalised run only:
 # articles/starters plus bullet-opener words ('Potential for AI to…'
@@ -488,10 +488,11 @@ def _extract_entities(sentence: str) -> list:
 
     def _flush(run):
         words = [(t, k, i) for (t, k, i) in run if k is not None]
-        # A clause-start gerund/past-tense verb is grammar, not a name:
-        # 'Sharing API data…' must not mint the entity 'Sharing API'.
+        # A clause-start verb/adjective form is grammar, not a name:
+        # 'Sharing API data…' must not mint the entity 'Sharing API',
+        # nor 'Scalable APIs are…' the entity 'Scalable APIs'.
         if len(words) > 1 and words[0][2] == 0 \
-                and _stop_form(words[0][0]).endswith(("ing", "ed")):
+                and _stop_form(words[0][0]).endswith(("ing", "ed", "able", "ible")):
             words.pop(0)
         while words and _stop_form(words[0][0]) in _LEADING_STOP:
             words.pop(0)
@@ -751,7 +752,14 @@ def check_claims(content: str, sources: list, internal_text: str = "",
         if entities:
             for e in facts["entities"]:
                 en = _match_norm(e)
-                if en and f" {en} " not in f" {norm} " and not all(t in tokens for t in en.split()):
+
+                def _tok_ok(t: str) -> bool:
+                    # plural-tolerant: a claim's 'LLMs' matches the
+                    # source's 'LLM', and vice versa.
+                    return (t in tokens or (t.endswith("s") and t[:-1] in tokens)
+                            or (t + "s") in tokens)
+
+                if en and f" {en} " not in f" {norm} " and not all(_tok_ok(t) for t in en.split()):
                     miss.append(en)
         for d in sorted(facts["dates"]):
             if d not in dates:

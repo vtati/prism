@@ -47,7 +47,10 @@ NO_SCORE_RULE = ("NEVER quote the internal rubric score, any numeric rating or s
 
 def _system_prompt(kind: str, tone: str) -> str:
     system = (f"You are Prism's {kind} maker. Tone: {tone}. Use ONLY the evidence provided; "
-              "keep every source URL in the output. Return just the artifact text.")
+              "keep every source URL in the output. A reviewer agent will check every number, "
+              "named entity and date in your text against the evidence text — do not add facts, "
+              "figures, or descriptive compounds (e.g. 'AI-driven') that the evidence does not "
+              "contain. Return just the artifact text.")
     if kind in PUBLIC_KINDS:
         system += " " + NO_SCORE_RULE
     return system
@@ -240,6 +243,8 @@ def _polish_stories_llm(stories: list[dict], ctx) -> list[dict]:
                   "three why-it-matters bullets (<=120 chars each, no engagement counts, no hype) "
                   "and a one-line verdict (<=85 chars), using ONLY the evidence given. "
                   "Never mention scores, ratings, or '/100' numbers — they are internal metadata. "
+                  "A reviewer will check every number, name and date against the evidence text: "
+                  "do not introduce facts or descriptive compounds the evidence does not contain. "
                   "Return ONLY a JSON list of {bullets: [..], verdict: str} in the same order.")
         user = "\n\n".join(
             f"[{i}] {s['heading']}\nEvidence: {(s.get('_snippet') or '')[:400]}"
