@@ -481,6 +481,11 @@ def _extract_entities(sentence: str) -> list:
 
     def _flush(run):
         words = [(t, k, i) for (t, k, i) in run if k is not None]
+        # A clause-start gerund/past-tense verb is grammar, not a name:
+        # 'Sharing API data…' must not mint the entity 'Sharing API'.
+        if len(words) > 1 and words[0][2] == 0 \
+                and _stop_form(words[0][0]).endswith(("ing", "ed")):
+            words.pop(0)
         while words and _stop_form(words[0][0]) in _LEADING_STOP:
             words.pop(0)
         while words and _stop_form(words[-1][0]) in _LEADING_STOP:
@@ -635,6 +640,15 @@ def split_claims(content: str, known_tokens: set | None = None) -> list:
             for clause in re.split(r":\s+|;\s+|\s+—\s+", sent):
                 s = clause.strip()
                 if len(s) < 12 or _is_receipt(s):
+                    continue
+                # A standalone all-capitalised short line is a heading
+                # or label ('Key Insights:', 'Separation Strategy'),
+                # not a claim — LLM-polished artifacts use them as
+                # section furniture.
+                clause_toks = re.findall(r"[A-Za-z][A-Za-z0-9&'.-]*", s)
+                if 0 < len(clause_toks) <= 6 and all(
+                        _cap_kind(t) is not None or t.lower() in _ENTITY_CONNECTORS
+                        for t in clause_toks):
                     continue
                 facts = key_facts(s)
                 lead = _lead_token(s)

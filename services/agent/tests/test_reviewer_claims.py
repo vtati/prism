@@ -318,6 +318,29 @@ def test_spelled_out_number_with_magnitude_is_a_checkable_fact():
     assert ok and ok[0]["support"] == "supported", ok
 
 
+def test_section_headings_are_not_claims():
+    """Live staging run e2f7d00e10c1 (2026-11-04): gpt-4o-polished
+    briefings use standalone capitalised headings ('Key Insights:',
+    'Separation Strategy') — section furniture, not factual claims."""
+    claims = graph.split_claims(
+        "Key Insights:\n\nSeparation Strategy\n\nEngineering Focus\n\n"
+        "Cua released an open-source framework that lets AI agents control "
+        "computers through vision and keyboard actions.")
+    assert claims and all("Insights" not in c and "Strategy" not in c
+                          and "Focus" not in c for c in claims), claims
+
+
+def test_clause_start_gerund_does_not_mint_an_entity():
+    """Same live run: 'Sharing API data without consent…' minted the
+    bogus entity 'Sharing API'. The gerund is grammar; 'API' is the
+    only entity, and the source supports it."""
+    src = [{"url": SOURCE["url"], "title": "API sharing rules",
+            "snippet": "The API lets apps share data only with user consent."}]
+    claims = graph.check_claims(
+        "Sharing API data without consent can breach user trust.", src)
+    assert claims and claims[0]["support"] == "supported", claims
+
+
 def test_review_state_is_json_serializable():
     import json
 
